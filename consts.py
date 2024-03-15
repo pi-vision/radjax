@@ -1,0 +1,10 @@
+cc = 2.9979245800000e10           # Light speed         [cm/s]
+kk = 1.3807e-16                   # Bolzmann's constant [erg/K]
+mp = 1.6726e-24                   # Mass of proton      [g]
+hh = 6.6262000e-27                # Planck constant 
+khz = 1e3                         # Kilohertz
+mhz = 1e6                         # Megahertz
+ghz = 1e9                         # Gigahertz
+pc = 3.08572e18                   # Parsec [cm]
+molecular_weight_co = 28.0        # g/mol
+m_mol = molecular_weight_co * mp
