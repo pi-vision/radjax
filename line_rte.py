@@ -57,23 +57,22 @@ def n_up_down(gas_nd, gas_t, energy_levels, radiative_transitions, line_index=2)
     dendivk = (hh*cc/kk) * np.diff(energy_levels[:,1])
     dummy = np.exp(-dendivk[None]/partition_temp[:,None]) * (energy_levels[1:,2] / energy_levels[:-1,2])
     partition_fn = energy_levels[0,2] + np.sum(np.cumproduct(dummy, axis=-1), axis=-1)
+    pfunc = jnp.interp(gas_t, partition_temp, partition_fn)
     
     # Construct the partition function by linear interpolation in the table
-    dendivk1 = (hh*cc/kk) * (energy_levels[:,1] - energy_levels[0,1])
-    levelweight = energy_levels[:,2]
-
-    # Construct vector equation for multiple grid points
-    dendivk1 = grid.expand_dims(dendivk1, gas_t.ndim+1, axis=-1)
-    levelweight = grid.expand_dims(levelweight, gas_t.ndim+1, axis=-1)
-    
-    pfunc = jnp.interp(gas_t, partition_temp, partition_fn)
-    levelpop = (gas_nd / pfunc) * np.exp(-dendivk1/gas_t) * levelweight
     up_idx, dn_idx = int(radiative_transitions[line_index,1]-1), int(radiative_transitions[line_index,2]-1)
-    n_up, n_dn = levelpop[up_idx], levelpop[dn_idx]
+    dendivk_up = (hh*cc/kk) * (energy_levels[up_idx,1] - energy_levels[0,1])
+    dendivk_dn = (hh*cc/kk) * (energy_levels[dn_idx,1] - energy_levels[0,1])
+    levelweight_up = energy_levels[up_idx,2]
+    levelweight_dn = energy_levels[dn_idx,2]
+    
+    n_up = (gas_nd / pfunc) * np.exp(-dendivk_up/gas_t) * levelweight_up
+    n_dn = (gas_nd / pfunc) * np.exp(-dendivk_dn/gas_t) * levelweight_dn
+    
     return n_up, n_dn
 
 
-def compute_spectral_cube(camera_freqs, gas_v, gas_t, n_up, n_dn, a_ud, b_ud, b_du, ray_coords, obs_dir, nu0, pixel_area, alpha_turb=0.0):
+def compute_spectral_cube(camera_freqs, gas_v, gas_t, n_up, n_dn, a_ud, b_ud, b_du, ray_coords, obs_dir, nu0, pixel_area, alpha_turb=0.0, m_mol=m_co):
     """
     Compute radiative tranfer for gaussian emission lines. 
     Output units for image fluxes are Jy.
@@ -90,8 +89,6 @@ def compute_spectral_cube(camera_freqs, gas_v, gas_t, n_up, n_dn, a_ud, b_ud, b_
     # The line profile is a Gaussian with width (alpha) and shifted by doppler
     dnu = grid.expand_dims(camera_freqs, gas_t.ndim+1, axis=-1) - nu0 - doppler*nu0
     line_profile = (cc/(alpha_tot*nu0*jnp.sqrt(jnp.pi))) * jnp.exp(-(cc*dnu/(nu0*alpha_tot))**2)
-
-
     
     # Compute emissivity (j_nu) and extinction (alpha_nu) for radiative transfer
     #     h nu_0                                          h nu_0
@@ -105,17 +102,20 @@ def compute_spectral_cube(camera_freqs, gas_v, gas_t, n_up, n_dn, a_ud, b_ud, b_
     ray_ds = jnp.sqrt(jnp.sum(jnp.diff(ray_coords, axis=1)**2, axis=-1))
     dtau = 0.5 * (a_nu[...,1:] + a_nu[...,:-1]) * ray_ds
 
-    beta = (dtau - 1 + jnp.exp(-dtau)) / dtau
-    beta = jnp.where(dtau > 1e-6, beta, 0.5*dtau)
-    
     # First order interpolation of the source
     source_1st = 0.5 * (j_nu[...,1:] + j_nu[...,:-1]) * ray_ds
     
-    # Second order interpolation of the source
-    s_nu = j_nu / (a_nu + 1e-99)
+    # Second order integration of the source
+    # Notes: https://www.ita.uni-heidelberg.de/~dullemond/software/radmc-3d/manual_radmc3d/imagesspectra.html#sec-second-order
+    s_nu = j_nu / (a_nu + 1e-30)   # Radmc3d has +1e-99 but this results in nans
+    beta = (dtau - 1 + jnp.exp(-dtau)) / dtau
+    beta = jnp.where(dtau > 1e-6, beta, 0.5*dtau)
     source_2nd = (1 - jnp.exp(-dtau) - beta) * s_nu[...,:-1] + beta * s_nu[...,1:]
     source_2nd = jnp.where(source_2nd < source_1st, source_2nd, source_1st)
-    intensity = (source_1st * jnp.exp(-jnp.cumsum(dtau, axis=-1))).sum(axis=-1)
+    
+    attenuation = jnp.exp(-jnp.cumsum(jnp.pad(dtau, [(0,0),(0,0),(1,0)]), axis=-1))[...,:-1]
+    intensity = (source_2nd * attenuation).sum(axis=-1)
+    #intensity = (source_2nd * jnp.exp(-jnp.cumsum(dtau, axis=-1))).sum(axis=-1)
 
     # Conversion from erg/s/cm/cm/ster to Jy/pixel
     image_fluxes_jy =  pixel_area / pc**2 * 1e23 * intensity

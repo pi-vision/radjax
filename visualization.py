@@ -58,7 +58,7 @@ def compare_images(img1, img2, axes=None, cmap='afmhot', exp_cbar=False):
         cbar.formatter.set_powerlimits((0,0))
     return fig, axes
 
-def slider(movie, fov=1, axis=0, ax=None, cmap=None, vmin=None, vmax=None,  origin='lower'):
+def slider(movie, fov=1, axis=0, ax=None, cmap=None, vmin=None, vmax=None, origin='lower'):
     from ipywidgets import interact
     movie = np.array(movie)
     if movie.ndim != 3:
@@ -79,8 +79,8 @@ def slider(movie, fov=1, axis=0, ax=None, cmap=None, vmin=None, vmax=None,  orig
     def imshow_frame(frame):
         img = np.take(movie, frame, axis=axis)
         im.set_array(img)
-        clim_min = max(np.nanmin(img), vmin if vmin is not None else -np.inf)
-        clim_max = min(np.nanmax(img), vmax if vmax is not None else np.inf)
+        clim_min = vmin if vmin is not None else np.nanmin(img) 
+        clim_max = vmax if vmax is not None else np.nanmax(img) 
         cbar.mappable.set_clim([clim_min, clim_max])
         
     interact(imshow_frame, frame=(0, num_frames-1));

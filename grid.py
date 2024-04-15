@@ -62,12 +62,12 @@ def interpolate_scalar(volume, coords, bbox, cval=0.0, order=1):
     interpolated_data = jscp.ndimage.map_coordinates(volume, image_coords, order=int(order), cval=float(cval))
     return interpolated_data
 
-def interpolate_vector(vector_field, coords_cart, coords_sph, bbox):
+def interpolate_vector(vector_field, coords_cart, coords_sph, bbox, cval=0.0, order=1):
     """
     Vector dimension along last axis. 
     Input vector is spherical interpolated to Cartesian coordinates.
     """
-    v_sph = jnp.stack([interpolate_scalar(vector_field[...,i], coords_sph, bbox) for i in range(3)], axis=-1)
+    v_sph = jnp.stack([interpolate_scalar(vector_field[...,i], coords_sph, bbox, cval, order) for i in range(3)], axis=-1)
     v_cart = spherical_vec_to_cartesian(v_sph, coords_cart, bbox)
     return v_cart
     

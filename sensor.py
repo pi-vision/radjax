@@ -1,4 +1,5 @@
 import jax.numpy as jnp
+import numpy as np
 import grid
 from consts import *
 
@@ -18,9 +19,103 @@ def compute_camera_freqs(linenlam, width_kms, nu0, num_subfreq=1, subfreq_width=
         assert subfreq_width, "if num_subfreq>1, subfreq_width should be specified"
         camera_freqs = jnp.linspace(camera_freqs-subfreq_width/2, camera_freqs+subfreq_width/2, num_subfreq, axis=1)
     return camera_freqs
+
+def orthographic_disk_projection(npix, nray, incl, phi, posang, fov, r_min, r_max, theta_min, theta_max):
+    """
+    Parallel ray projection --> Observer at infinity
+    The rays are constrained to start and terminate within a disk described by (r_min, r_max), (theta_min, theta_max)
+
+    Parameters
+    ----------
+    npix: int,
+        Number of pixels on camera x,y axis
+    nray: int,
+        Number of point along each ray. 
+    incl: float, 
+        inclination angle [deg]
+    phi: float,
+        azimuthal angle [deg]
+    posang: float,
+        camera roll angle in [deg]
+    fov: float,
+        field of view in grid units
+    r_min: float,
+        minimum radius of the disk 
+    r_min: float,
+        maximum radius of the disk
+    theta_min: float,
+        minimum inclination of the disk [radians] (note the units differ from view angle!)
+    theta_max: float,
+        maximum inclination of the disk [radians] (note the units differ from view angle!)
+    """
+    obs_dir = grid.rotate_coords([0,0,1], incl, phi, posang)
     
+    # XY Plane coordinates
+    ray_x = jnp.linspace(-0.5, 0.5, npix) * fov * (npix-1)/npix
+    ray_y = jnp.linspace(-0.5, 0.5, npix) * fov * (npix-1)/npix
+    xy_plane = jnp.stack(jnp.meshgrid(ray_x, ray_y, jnp.array([0.0]), indexing='xy'), axis=-1).reshape(npix*npix, 1, 3)
+    xy_plane_rot = jnp.squeeze(grid.rotate_coords(xy_plane, incl, phi, posang))
+    
+    # Solve for the intersection of the observation vector with the sphere r=r_max
+    # This ends up being a quadratic expression
+    r_sq = jnp.sum(xy_plane_rot**2, axis=-1)
+    a = jnp.sum(obs_dir**2)
+    b = 2 * jnp.sum(xy_plane_rot*obs_dir, axis=-1)
+    c = r_sq - r_max**2
+    s = (-b+jnp.sqrt(b**2 - 4*a*c)) / (2*a)
+    t = (-b-jnp.sqrt(b**2 - 4*a*c)) / (2*a)
+    ray_start = np.array(xy_plane_rot + s[:,None] * obs_dir[None,:])
+    ray_stop = np.array(xy_plane_rot + t[:,None] * obs_dir[None,:])
+    
+    # Intersection with {theta_min, theta_max} cones
+    a_min = (obs_dir[0]**2 + obs_dir[1]**2)*jnp.cos(theta_min)**2 - obs_dir[2]**2*jnp.sin(theta_min)**2
+    a_max = (obs_dir[0]**2 + obs_dir[1]**2)*jnp.cos(theta_max)**2 - obs_dir[2]**2*jnp.sin(theta_max)**2
+    b_min = 2*(ray_start[...,0]*obs_dir[0] + ray_start[...,1]*obs_dir[1])*jnp.cos(theta_min)**2 - 2*ray_start[...,2]*obs_dir[2]*jnp.sin(theta_min)**2
+    b_max = 2*(ray_start[...,0]*obs_dir[0] + ray_start[...,1]*obs_dir[1])*jnp.cos(theta_max)**2 - 2*ray_start[...,2]*obs_dir[2]*jnp.sin(theta_max)**2
+    c_min = (ray_start[...,0]**2 + ray_start[...,1]**2)*jnp.cos(theta_min)**2 - ray_start[...,2]**2*jnp.sin(theta_min)**2
+    c_max = (ray_start[...,0]**2 + ray_start[...,1]**2)*jnp.cos(theta_max)**2 - ray_start[...,2]**2*jnp.sin(theta_max)**2
+    s = (-b_max+jnp.sqrt(b_max**2 - 4*a_max*c_max)) / (2*a_max)
+    t = (-b_min-jnp.sqrt(b_min**2 - 4*a_min*c_min)) / (2*a_min)
+    cone_bottom = ray_start + s[:,None] * obs_dir[None,:]
+    cone_top = ray_start + t[:,None] * obs_dir[None,:]
+    
+    # Project start/stop points that intersect the top/bottom cones
+    ray_start_theta = grid.cartesian_to_spherical(ray_start)[:,1]
+    ray_stop_theta = grid.cartesian_to_spherical(ray_stop)[:,1]
+    ray_start[ray_start_theta<theta_min,:] = cone_top[ray_start_theta<theta_min]
+    ray_start[ray_start_theta>theta_max,:] = cone_bottom[ray_start_theta>theta_max]
+    ray_stop[ray_stop_theta<theta_min,:] = cone_top[ray_stop_theta<theta_min]
+    ray_stop[ray_stop_theta>theta_max,:] = cone_bottom[ray_stop_theta>theta_max]
+    
+    # Remove start/stop points that are both outside the angle range
+    ray_start[np.bitwise_and(ray_start_theta<theta_min, ray_stop_theta<theta_min),:] = np.nan
+    ray_start[np.bitwise_and(ray_start_theta>theta_max, ray_stop_theta>theta_max),:] = np.nan
+    ray_stop[np.bitwise_and(ray_start_theta<theta_min, ray_stop_theta<theta_min),:] = np.nan
+    ray_stop[np.bitwise_and(ray_start_theta>theta_max, ray_stop_theta>theta_max),:] = np.nan
+    
+    # Project start/stop points that intersect the r_min sphere
+    # This ends up being a quadratic expression
+    ray_start_r = grid.cartesian_to_spherical(ray_start)[:,2]
+    ray_stop_r = grid.cartesian_to_spherical(ray_stop)[:,2]
+    c = r_sq - r_min**2
+    s = (-b+jnp.sqrt(b**2 - 4*a*c)) / (2*a)
+    t = (-b-jnp.sqrt(b**2 - 4*a*c)) / (2*a)
+    ray_start[ray_start_r<r_min,:] = xy_plane_rot[ray_start_r<r_min,:] + t[ray_start_r<r_min,None] * obs_dir[None,:]
+    ray_stop[ray_stop_r<r_min,:] = xy_plane_rot[ray_stop_r<r_min,:] + s[ray_stop_r<r_min,None] * obs_dir[None,:]
+    
+    # Remove points that are within r_min 
+    remove_indices = np.bitwise_and(ray_start_r<r_min, ray_stop_r<r_min)
+    ray_start[remove_indices,:] = ray_stop[remove_indices,:] = np.nan
+    
+    ray_coords = np.linspace(ray_start, ray_stop, nray, axis=1)
+    return ray_coords, obs_dir
+
 def orthographic_projection(npix, nray, incl, phi, posang, fov, z_width):
-    """Observer at infinity
+    """
+    Parallel ray projection --> Observer at infinity
+
+    Parameters
+    ----------
     npix: int,
         Number of pixels on camera x,y axis
     nray: int,
