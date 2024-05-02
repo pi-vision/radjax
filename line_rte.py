@@ -115,7 +115,6 @@ def compute_spectral_cube(camera_freqs, gas_v, gas_t, n_up, n_dn, a_ud, b_ud, b_
     
     attenuation = jnp.exp(-jnp.cumsum(jnp.pad(dtau, [(0,0),(0,0),(1,0)]), axis=-1))[...,:-1]
     intensity = (source_2nd * attenuation).sum(axis=-1)
-    #intensity = (source_2nd * jnp.exp(-jnp.cumsum(dtau, axis=-1))).sum(axis=-1)
 
     # Conversion from erg/s/cm/cm/ster to Jy/pixel
     image_fluxes_jy =  pixel_area / pc**2 * 1e23 * intensity
