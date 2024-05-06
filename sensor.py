@@ -1,7 +1,12 @@
+from collections import namedtuple
 import jax.numpy as jnp
 import numpy as np
 import grid
 from consts import *
+
+Projection = namedtuple('Projection', 
+                        ['npix', 'nray', 'incl', 'phi', 'posang', 'fov', 'r_min', 
+                         'r_max', 'theta_min', 'theta_max', 'linelam', 'width_kms', 'nu0'])
 
 def compute_camera_freqs(linenlam, width_kms, nu0, num_subfreq=1, subfreq_width=None, v_kms=0.0):
     """
@@ -41,7 +46,7 @@ def orthographic_disk_projection(npix, nray, incl, phi, posang, fov, r_min, r_ma
         field of view in grid units
     r_min: float,
         minimum radius of the disk 
-    r_min: float,
+    r_max: float,
         maximum radius of the disk
     theta_min: float,
         minimum inclination of the disk [radians] (note the units differ from view angle!)
