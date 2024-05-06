@@ -56,7 +56,7 @@ def n_up_down(gas_nd, gas_t, energy_levels, radiative_transitions, line_index=2)
     # compute the partition function based on all available levels for this molecule.
     dendivk = (hh*cc/kk) * np.diff(energy_levels[:,1])
     dummy = np.exp(-dendivk[None]/partition_temp[:,None]) * (energy_levels[1:,2] / energy_levels[:-1,2])
-    partition_fn = energy_levels[0,2] + np.sum(np.cumproduct(dummy, axis=-1), axis=-1)
+    partition_fn = energy_levels[0,2] + np.sum(np.cumprod(dummy, axis=-1), axis=-1)
     pfunc = jnp.interp(gas_t, partition_temp, partition_fn)
     
     # Construct the partition function by linear interpolation in the table
