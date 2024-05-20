@@ -1,14 +1,29 @@
-from collections import namedtuple
+from dataclasses import dataclass
+import jax
+import jax.scipy as jsp
 import jax.numpy as jnp
 import numpy as np
 import grid
 from consts import *
 
-Projection = namedtuple('Projection', 
-                        ['npix', 'nray', 'incl', 'phi', 'posang', 'fov', 'r_min', 
-                         'r_max', 'theta_min', 'theta_max', 'linelam', 'width_kms', 'nu0'])
-
-def compute_camera_freqs(linenlam, width_kms, nu0, num_subfreq=1, subfreq_width=None, v_kms=0.0):
+@dataclass
+class Projection:
+    name: str
+    npix: int
+    nray: int
+    incl: float
+    phi: float
+    posang: float
+    fov: float
+    r_min: float
+    r_max: float
+    theta_min: float
+    theta_max: float
+    linelam: float
+    width_kms: float
+    v_sys: float = 0.0
+    
+def compute_camera_freqs(linenlam, width_kms, nu0, v_sys=0.0, num_subfreq=1, subfreq_width=None):
     """
     width_kms: float,
         Width of the spectral window
@@ -16,10 +31,10 @@ def compute_camera_freqs(linenlam, width_kms, nu0, num_subfreq=1, subfreq_width=
         Spectral resolution
     nu0: float, 
         Central frequency.
-    v_kms: float,
-        Zero-point of the freqency grid. Default is 0 results in a grid centered around nu0.
+    v_sys: float,
+        systematic velocity of the disk [km/s] (zero-point of the freqency grid). Default is 0 results in a grid centered around nu0.
     """
-    camera_freqs = nu0 * (1 - v_kms*1e5/cc - (2*jnp.arange(linenlam)/(linenlam-1)-1)*width_kms*1e5/cc)
+    camera_freqs = nu0 * (1 - v_sys*1e5/cc - (2*jnp.arange(linenlam)/(linenlam-1)-1)*width_kms*1e5/cc)
     if num_subfreq > 1:
         assert subfreq_width, "if num_subfreq>1, subfreq_width should be specified"
         camera_freqs = jnp.linspace(camera_freqs-subfreq_width/2, camera_freqs+subfreq_width/2, num_subfreq, axis=1)
@@ -163,3 +178,32 @@ def project_volume(volume, coords, bbox):
     projection = jnp.sum(volume_zero_order * ds, axis=-1)
     return projection
 
+def make_gaussian(size, fov_rad, fwhm_max, fwhm_min, theta, frac=1.0, x_c=0.0, y_c=0.0):
+    psize_rad = fov_rad/size
+    x = jnp.linspace(-(fov_rad-psize_rad)/2.0, (fov_rad-psize_rad)/2.0, size) - x_c
+    y = jnp.linspace(-(fov_rad-psize_rad)/2.0, (fov_rad-psize_rad)/2.0, size) - y_c
+    xx, yy = jnp.meshgrid(x, y, indexing='ij')
+    sigma_maj = fwhm_max / (2. * jnp.sqrt(2. * jnp.log(2.)))
+    sigma_min = fwhm_min / (2. * jnp.sqrt(2. * jnp.log(2.)))
+    cth = jnp.cos(theta)
+    sth = jnp.sin(theta)
+    gaussian = jnp.exp(-(yy * cth + xx * sth)**2 / (2 * (frac * sigma_maj)**2) - (xx * cth - yy * sth)**2 / (2 * (frac * sigma_min)**2))
+    gaussian = gaussian / jnp.sum(gaussian)
+    return gaussian
+    
+def blur_gauss(images, fov_rad, fwhm_max, fwhm_min, theta=0.0, frac=1.0):
+    """
+    Blur image with a Gaussian beam defined by: [fwhm_max, fwhm_min, theta] in radians.
+
+    Notes
+    -----
+    This function is modeled after eht-imaging blur_gauss function: 
+    https://github.com/achael/eht-imaging/blob/9ebd83345b62dbcee1fe5267c6e27b786acfe9ff/ehtim/image.py#L1342
+    """
+    xdim, ydim = images.shape[-2:]
+    assert xdim == ydim, "non square image not supported."
+    
+    gaussian = make_gaussian(xdim, fov_rad, fwhm_max, fwhm_min, theta, frac)
+    blur_vmap = jax.vmap(lambda x: jsp.signal.fftconvolve(x, gaussian, mode='same'))
+    images_blurred = blur_vmap(images)
+    return images_blurred
