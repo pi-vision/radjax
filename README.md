@@ -1,5 +1,6 @@
-# neural-lte
-A neural approach to line transfer tomography of protoplanetary disks
+# radjax
+A `JAX` based line radiative transfer code for inference of protoplanetary disks. \
+JAX based array operation produce significant speed ups enabling fast computations of line-rte. 
 
 Installation
 ---
@@ -25,5 +26,5 @@ pip install flax optax diffrax tensorboard tensorboardX
 Install additional packages 
 ```
 pip install numpy scipy scikit-learn scikit-image matplotlib jupyterlab nodejs tqdm ipympl ipyvolume mpmath ruamel.yaml corner
-conda install emcee h5py
+conda install emcee h5py ffmpeg
 ```
