@@ -8,6 +8,7 @@ ghz = 1e9                         # Gigahertz
 kg = 1e3                          # Kilogram
 erg = 1e-7                        # Joules
 pc = 3.08572e18                   # Parsec [cm]
+arcsec = 4.84814e-6               # arcsecond to radians
 molecular_weight_co = 28.0        # g/mol
 molecular_weight_h = 1.008        # g/mol
 au = 14959787066000.              # astronomical unit in cm

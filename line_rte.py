@@ -3,7 +3,7 @@ import numpy as np
 import grid
 from consts import *
 
-def einstein_coefficients(energy_levels, radiative_transitions, line_index=2):
+def einstein_coefficients(energy_levels, radiative_transitions, transition=3):
     """
     a_ud is the Einstein coefficient for spontaneous emission from level u to level d.
     b_ud and b_du are the Einstein-B-coefficients
@@ -14,8 +14,8 @@ def einstein_coefficients(energy_levels, radiative_transitions, line_index=2):
         shape=(num_levels, 4);  columns = LEVEL   ENERGIES(cm^-1)   WEIGHT   J
     radiative_transitions: np.array
         shape=(num_levels-1, 6); colums = TRANS   UP   LOW  EINSTEINA(s^-1)  FREQ(GHz)       E_u(K)
-    line_index: int,
-        default=2, for CO at ~345 GHz
+    transition: int,
+        default=3, for CO(3-2) at ~345 GHz
         
     Notes
     -----
@@ -25,6 +25,7 @@ def einstein_coefficients(energy_levels, radiative_transitions, line_index=2):
     More info: https://www.ita.uni-heidelberg.de/~dullemond/software/radmc-3d/manual_radmc3d/lineradtrans.html
     """
     # extract up and down indices from radiative transition table (e.g. 4,3 for second CO line at 345GHz)
+    line_index = transition - 1
     nu0 = radiative_transitions[line_index,4] * ghz
     up_idx, dn_idx = int(radiative_transitions[line_index,1]-1), int(radiative_transitions[line_index,2]-1)
     gratio = energy_levels[up_idx,2] / energy_levels[dn_idx,2]
@@ -33,7 +34,7 @@ def einstein_coefficients(energy_levels, radiative_transitions, line_index=2):
     b_du = b_ud * gratio
     return nu0, a_ud, b_ud, b_du
 
-def n_up_down(gas_nd, gas_t, energy_levels, radiative_transitions, line_index=2):
+def n_up_down(gas_nd, gas_t, energy_levels, radiative_transitions, transition=3):
     """
     Parameters
     ----------
@@ -45,49 +46,45 @@ def n_up_down(gas_nd, gas_t, energy_levels, radiative_transitions, line_index=2)
         shape=(num_levels, 4);  columns = LEVEL   ENERGIES(cm^-1)   WEIGHT   J
     radiative_transitions: np.array
         shape=(num_levels-1, 6); colums = TRANS   UP   LOW  EINSTEINA(s^-1)  FREQ(GHz)       E_u(K)
-    line_index: int,
-        default=2, for CO at ~345 GHz
+    transition: int,
+        default=3, for CO(3-2) at ~345 GHz
     """
-    
     # Create a temperature point
     ntemp, temp0, temp1 = 1000, 0.1, 100000
-    partition_temp = temp0 * (temp1/temp0)**(np.arange(ntemp)/(ntemp-1))
+    partition_temp = temp0 * (temp1/temp0)**(jnp.arange(ntemp)/(ntemp-1))
     
     # compute the partition function based on all available levels for this molecule.
-    dendivk = (hh*cc/kk) * np.diff(energy_levels[:,1])
-    dummy = np.exp(-dendivk[None]/partition_temp[:,None]) * (energy_levels[1:,2] / energy_levels[:-1,2])
-    partition_fn = energy_levels[0,2] + np.sum(np.cumprod(dummy, axis=-1), axis=-1)
+    dendivk = (hh*cc/kk) * jnp.diff(energy_levels[:,1])
+    dummy = jnp.exp(-dendivk[None]/partition_temp[:,None]) * (energy_levels[1:,2] / energy_levels[:-1,2])
+    partition_fn = energy_levels[0,2] + jnp.sum(jnp.cumprod(dummy, axis=-1), axis=-1)
     pfunc = jnp.interp(gas_t, partition_temp, partition_fn)
     
     # Construct the partition function by linear interpolation in the table
+    line_index = transition - 1
     up_idx, dn_idx = int(radiative_transitions[line_index,1]-1), int(radiative_transitions[line_index,2]-1)
     dendivk_up = (hh*cc/kk) * (energy_levels[up_idx,1] - energy_levels[0,1])
     dendivk_dn = (hh*cc/kk) * (energy_levels[dn_idx,1] - energy_levels[0,1])
     levelweight_up = energy_levels[up_idx,2]
     levelweight_dn = energy_levels[dn_idx,2]
     
-    n_up = (gas_nd / pfunc) * np.exp(-dendivk_up/gas_t) * levelweight_up
-    n_dn = (gas_nd / pfunc) * np.exp(-dendivk_dn/gas_t) * levelweight_dn
+    n_up = (gas_nd / pfunc) * jnp.exp(-dendivk_up/gas_t) * levelweight_up
+    n_dn = (gas_nd / pfunc) * jnp.exp(-dendivk_dn/gas_t) * levelweight_dn
     
     return n_up, n_dn
 
 
-def compute_spectral_cube(camera_freqs, gas_v, gas_t, n_up, n_dn, a_ud, b_ud, b_du, ray_coords, obs_dir, nu0, pixel_area, alpha_turb=0.0, m_mol=m_co):
+def compute_spectral_cube(camera_freqs, gas_v, alpha_tot, n_up, n_dn, a_ud, b_ud, b_du, ray_coords, obs_dir, nu0, pixel_area):
     """
     Compute radiative tranfer for gaussian emission lines. 
-    Output units for image fluxes are Jy.
+    Output units for image fluxes are Jy/pixel.
     """
-    # Compute spectral width
-    alpha_therm = jnp.sqrt(2*kk*gas_t/m_mol)
-    alpha_tot = jnp.sqrt(alpha_turb**2 + alpha_therm**2)
-    
     # Compute doppler shift
     # Note: doppler positive means moving toward observer, hence the minus sign
     doppler = (1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
 
     # Define a vector line profile over multiple camera frequencies 
     # The line profile is a Gaussian with width (alpha) and shifted by doppler
-    dnu = grid.expand_dims(camera_freqs, gas_t.ndim+1, axis=-1) - nu0 - doppler*nu0
+    dnu = grid.expand_dims(camera_freqs, alpha_tot.ndim+1, axis=-1) - nu0 - doppler*nu0
     line_profile = (cc/(alpha_tot*nu0*jnp.sqrt(jnp.pi))) * jnp.exp(-(cc*dnu/(nu0*alpha_tot))**2)
     
     # Compute emissivity (j_nu) and extinction (alpha_nu) for radiative transfer
@@ -99,7 +96,7 @@ def compute_spectral_cube(camera_freqs, gas_v, gas_t, n_up, n_dn, a_ud, b_ud, b_
     a_nu  = const * (n_dn * b_du - n_up * b_ud) * line_profile
 
     # Ray trace through the volume to compute image intensities
-    ray_ds = jnp.sqrt(jnp.sum(jnp.diff(ray_coords, axis=1)**2, axis=-1))
+    ray_ds = jnp.sqrt(jnp.sum(jnp.diff(ray_coords, axis=-2)**2, axis=-1))
     dtau = 0.5 * (a_nu[...,1:] + a_nu[...,:-1]) * ray_ds
 
     # First order interpolation of the source
@@ -112,15 +109,33 @@ def compute_spectral_cube(camera_freqs, gas_v, gas_t, n_up, n_dn, a_ud, b_ud, b_
     beta = jnp.where(dtau > 1e-6, beta, 0.5*dtau)
     source_2nd = (1 - jnp.exp(-dtau) - beta) * s_nu[...,:-1] + beta * s_nu[...,1:]
     source_2nd = jnp.where(source_2nd < source_1st, source_2nd, source_1st)
-    
-    attenuation = jnp.exp(-jnp.cumsum(jnp.pad(dtau, [(0,0),(0,0),(1,0)]), axis=-1))[...,:-1]
+
+    pad_width = [(0,0)]*(dtau.ndim-1) + [(1,0)]
+    attenuation = jnp.exp(-jnp.cumsum(jnp.pad(dtau, pad_width), axis=-1))[...,:-1]
     intensity = (source_2nd * attenuation).sum(axis=-1)
 
     # Conversion from erg/s/cm/cm/ster to Jy/pixel
     image_fluxes_jy =  pixel_area / pc**2 * 1e23 * intensity
     return image_fluxes_jy
 
+def alpha_total_co(v_turb, gas_t, m_mol):
+    """
+    Compute the total line broadening due to thermal and turbulence velocities
 
+    Parameters
+    ----------
+    v_turb: float
+        turbulence broadening scaled by the speed of sound.
+    gas_t: jnp.array
+        Temperature field (K)
+    m_mol: float,
+        Molecular weight
+    """
+    alpha_therm_sq = 2*kk*gas_t / m_co
+    cs_sq = 2*kk*gas_t / m_mol  # local speed of sound
+    alpha_tot = jnp.sqrt(alpha_therm_sq + v_turb**2 * cs_sq)
+    return alpha_tot
+    
 def load_molecular_tables(path):
     """
     Load molecular information
@@ -141,6 +156,3 @@ def load_molecular_tables(path):
     energy_levels = np.loadtxt(path, skiprows=7, max_rows=41)
     radiative_transitions = np.loadtxt(path, skiprows=51, max_rows=40)
     return energy_levels, radiative_transitions
-
-def compute_partition_function(molecule_file):
-    return
