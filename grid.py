@@ -15,24 +15,22 @@ def read_spherical_amr(path):
     theta = np.loadtxt(path, skiprows=6+nr+1, max_rows=nth+1)
     phi = np.loadtxt(path, skiprows=6+nr+nth+2, max_rows=nph+1)
     return r, theta, phi
-    
+
 def cartesian_to_spherical(coords, logr=False):
-    x, y, z = coords[...,0], coords[...,1], coords[...,2]
-    r = jnp.sqrt(x**2 + y**2 + z**2)
+    r = jnp.sqrt(coords[...,0]**2 + coords[...,1]**2 + coords[...,2]**2)
     r = jnp.log10(r) if logr==True else r
-    rho = jnp.sqrt(x**2 + y**2)
-    theta = jnp.arctan2(rho, z)
-    phi = (jnp.arctan2(y, x) + 2*jnp.pi) % (2*jnp.pi)
+    rho = jnp.sqrt(coords[...,0]**2 + coords[...,1]**2)
+    theta = jnp.arctan2(rho, coords[...,2])
+    phi = (jnp.arctan2(coords[...,1], coords[...,0]) + 2*jnp.pi) % (2*jnp.pi)
     coords_sph = jnp.stack([phi, theta, r], axis=-1)
     return coords_sph
 
 def spherical_vec_to_cartesian(vector, coords, bbox):
-    x, y, z = coords[...,0], coords[...,1], coords[...,2]
-    r = jnp.sqrt(x**2 + y**2 + z**2)
-    rho = jnp.sqrt(x**2 + y**2)
-    cosp = x/rho
-    sinp = y/rho
-    cost = z/r
+    r = jnp.sqrt(coords[...,0]**2 + coords[...,1]**2 + coords[...,2]**2)
+    rho = jnp.sqrt(coords[...,0]**2 + coords[...,1]**2)
+    cosp = coords[...,0]/rho
+    sinp = coords[...,1]/rho
+    cost = coords[...,2]/r
     sint = rho/r
     dummy = sint * vector[...,0] + cost * vector[...,1]
     vx   = cosp * dummy - sinp * vector[...,2]
@@ -40,6 +38,13 @@ def spherical_vec_to_cartesian(vector, coords, bbox):
     vz   = cost * vector[...,0] - sint * vector[...,1]
     coords_cart = jnp.stack([vx, vy, vz], axis=-1)
     return coords_cart
+
+def spherical_to_zr(ray_coords_sph):
+    """Polar coordinates with azimuthal symmetry (phi) and mirror symmetry in vertical coordinate (z)"""
+    r_polar = ray_coords_sph[...,2] * jnp.sin(ray_coords_sph[...,1])
+    z_polar = jnp.abs(ray_coords_sph[...,2] * jnp.cos(ray_coords_sph[...,1]))
+    ray_coords_polar = jnp.stack((z_polar, r_polar), axis=-1)
+    return ray_coords_polar
     
 def rotate_coords(coords, incl, phi, posang):
     rot_matrix = scipy.spatial.transform.Rotation.from_euler('zxz', [posang, incl, -phi], degrees=True).as_matrix()
@@ -47,18 +52,10 @@ def rotate_coords(coords, incl, phi, posang):
     return coords_rot
 
 def world_to_image_coords(coords, bbox, npix):
-    image_coords = []
-    coords = jnp.array(coords)
-    if coords.shape == ():
-        image_coords = (coords - bbox[0]) * (npix - 1)/(bbox[1]-bbox[0])
-    else:
-        for i in range(coords.shape[-1]):
-            image_coords.append((coords[...,i] - bbox[i][0]) * (npix[i] - 1)/(bbox[i][1]-bbox[i][0]))
-        image_coords = jnp.stack(image_coords, axis=-1)
-    return image_coords
+    return (coords - bbox[:,0]) * (npix - 1)/(bbox[:,1]-bbox[:,0])
     
 def interpolate_scalar(volume, coords, bbox, cval=0.0, order=1):
-    image_coords = jnp.moveaxis(world_to_image_coords(coords, bbox, volume.shape), -1, 0)
+    image_coords = jnp.moveaxis(world_to_image_coords(coords, bbox, jnp.array(volume.shape)), -1, 0)
     interpolated_data = jscp.ndimage.map_coordinates(volume, image_coords, order=int(order), cval=float(cval))
     return interpolated_data
 

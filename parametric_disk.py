@@ -3,6 +3,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 from consts import *
 
+@jax.tree_util.register_pytree_node_class
 class DiskFlaherty(object):
     """
     A parameteric disk model based on Flaherty et al. (2015)
@@ -19,10 +20,10 @@ class DiskFlaherty(object):
     -----
     https://iopscience.iop.org/article/10.1088/0004-637X/813/2/99
     """
-    def __init__(self, name: str, T_mid1: float, T_atm1: float, q: float, M_star: float, gamma: float, r_in: float, 
+    def __init__(self, T_mid1: float, T_atm1: float, q: float, M_star: float, gamma: float, r_in: float, 
                  r_c: float, M_gas: float, v_turb: float, co_abundance: float, N_dissoc: float, z_q0: float, 
-                 molecule_table: str, transition: int, m_mol: float = 2.37*m_h, freezeout: float = 20.0, delta: float = 1, r_scale: float = 150):
-        self.name = name
+                 transition: int, m_mol: float, freezeout: float, delta: float, 
+                 r_scale: float, molecule_table: str, name: str = 'DiskFlaherty'):
         self.T_mid1 = T_mid1
         self.T_atm1 = T_atm1
         self.q = q
@@ -40,7 +41,8 @@ class DiskFlaherty(object):
         self.m_mol = m_mol
         self.freezeout = freezeout
         self.delta = delta
-        self.r_scale = r_scale
+        self.r_scale = r_scale        
+        self.name = name
 
     def temperature_profile(self, z, r):
         T_mid = self.T_mid1 * (r/self.r_scale)**(self.q)
@@ -62,6 +64,17 @@ class DiskFlaherty(object):
         """Modified Keplerian velocity to account for height and gas pressure above the midplane"""
         v = jnp.sqrt( vsq_keplerian_vertical(z, r, self.M_star) + vsq_pressure_grad(r, nd, temperature, self.m_mol) )
         return v
+        
+    def tree_flatten(self):
+        children = (self.T_mid1,self.T_atm1, self.q, self.M_star, self.gamma, 
+                    self.r_in, self.r_c, self.M_gas, self.v_turb, self.co_abundance, self.N_dissoc, 
+                    self.z_q0, self.transition, self.m_mol, self.freezeout, self.delta, self.r_scale)
+        aux_data = {'molecule_table': self.molecule_table, 'name': self.name}  # static values
+        return (children, aux_data)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        return cls(*children, **aux_data)
 
 
 class DiskWilliams(object):
@@ -158,44 +171,9 @@ def vsq_pressure_grad(r, nd, temperature, m_mol):
     return ((r*au)/rho)*pressure_grad
 
 def azimuthal_velocity(coords, v_phi):
-    ray_x, ray_y, ray_z = coords[...,0], coords[...,1], coords[...,2]
-    ray_r = jnp.sqrt(ray_x**2 + ray_y**2)
-    cosp = ray_x/ray_r
-    sinp = ray_y/ray_r
+    ray_r = jnp.sqrt(coords[...,0]**2 + coords[...,1]**2)
+    cosp = coords[...,0]/ray_r
+    sinp = coords[...,1]/ray_r
     vx, vy, vz = v_phi*cosp, v_phi*sinp, jnp.zeros_like(v_phi)
     velocity = jnp.stack([vx, vy, vz], axis=-1)
     return velocity
-    
-def v_Keplerian(x, y, r, v_az):
-    cosp = ray_x/ray_r
-    sinp = ray_y/ray_r
-    vx, vy, vz = v*cosp, v*sinp, jnp.zeros_like(v)
-    velocity = jnp.stack([vx, vy, vz], axis=-1)
-    return velocity
-
-@jax.jit
-def render_cube_jit(T_mid1, T_atm1, q, M_star, m_mol, delta, r_scale, gamma, r_in, r_c, M_gas, freezeout, N_dissoc, co_abundance,
-                    freqs, n_up, n_dn, a_ud, b_ud, b_du, ray_coords, obs_dir, nu0, pixel_area, alpha_turb,
-                    z_disk, r_disk, coords_polar, bbox_cyl, bbox):
-    temperature = parametric_disk.temperature_profile_williams(z_disk, r_disk, T_mid1, T_atm1, q, M_star, m_mol, delta, r_scale)
-    numberdens_h2 = parametric_disk.number_density_profile(z_disk, r_disk, temperature, disk.gamma, disk.r_in, disk.r_c, disk.M_gas, disk.M_star, disk.m_mol)
-    
-    # Compute the column integrated density N(h2) (units of 1/cm^2)
-    dz = jnp.diff(z_disk * au, axis=0)[0,0]
-    N_h2 = jnp.cumsum(numberdens_h2[::-1]*dz, axis=0)[::-1]
-    
-    co_region = jnp.bitwise_and(temperature>freezeout, N_h2>N_dissoc)
-    abundance_co = jnp.where(co_region, co_abundance, 0.0)
-    numberdens_co = abundance_co * numberdens_h2
-    
-    # Interpolate the data on spherical coordinates
-    numberdens_co_sph = grid.interpolate_scalar(numberdens_co, coords_polar, bbox=bbox_cyl)
-    temperature_sph = grid.interpolate_scalar(temperature, coords_polar, bbox=bbox_cyl)
-
-    # Interpolate dataset along the ray coordinates
-    gas_nd = grid.interpolate_scalar(numberdens_co_sph, ray_coords_sph, bbox)
-    gas_t  = grid.interpolate_scalar(temperature_sph, ray_coords_sph, bbox, cval=1e-10)
-    gas_v = parametric_disk.keplerian_velocity(ray_coords, M_star)
-
-    images = jnp.nan_to_num(line_rte.compute_spectral_cube(freqs, gas_v, gas_t, n_up, n_dn, a_ud, b_ud, b_du, ray_coords, obs_dir, nu0, pixel_area, alpha_turb))
-    return images

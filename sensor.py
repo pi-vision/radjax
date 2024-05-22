@@ -84,8 +84,8 @@ def orthographic_disk_projection(npix, nray, incl, phi, posang, fov, r_min, r_ma
     c = r_sq - r_max**2
     s = (-b+jnp.sqrt(b**2 - 4*a*c)) / (2*a)
     t = (-b-jnp.sqrt(b**2 - 4*a*c)) / (2*a)
-    ray_start = np.array(xy_plane_rot + s[:,None] * obs_dir[None,:])
-    ray_stop = np.array(xy_plane_rot + t[:,None] * obs_dir[None,:])
+    ray_start = jnp.array(xy_plane_rot + s[:,None] * obs_dir[None,:])
+    ray_stop = jnp.array(xy_plane_rot + t[:,None] * obs_dir[None,:])
     
     # Intersection with {theta_min, theta_max} cones
     a_min = (obs_dir[0]**2 + obs_dir[1]**2)*jnp.cos(theta_min)**2 - obs_dir[2]**2*jnp.sin(theta_min)**2
@@ -102,16 +102,16 @@ def orthographic_disk_projection(npix, nray, incl, phi, posang, fov, r_min, r_ma
     # Project start/stop points that intersect the top/bottom cones
     ray_start_theta = grid.cartesian_to_spherical(ray_start)[:,1]
     ray_stop_theta = grid.cartesian_to_spherical(ray_stop)[:,1]
-    ray_start[ray_start_theta<theta_min,:] = cone_top[ray_start_theta<theta_min]
-    ray_start[ray_start_theta>theta_max,:] = cone_bottom[ray_start_theta>theta_max]
-    ray_stop[ray_stop_theta<theta_min,:] = cone_top[ray_stop_theta<theta_min]
-    ray_stop[ray_stop_theta>theta_max,:] = cone_bottom[ray_stop_theta>theta_max]
+    ray_start.at[ray_start_theta<theta_min,:].set(cone_top[ray_start_theta<theta_min])
+    ray_start.at[ray_start_theta>theta_max,:].set(cone_bottom[ray_start_theta>theta_max])
+    ray_stop.at[ray_stop_theta<theta_min,:].set(cone_top[ray_stop_theta<theta_min])
+    ray_stop.at[ray_stop_theta>theta_max,:].set(cone_bottom[ray_stop_theta>theta_max])
     
     # Remove start/stop points that are both outside the angle range
-    ray_start[np.bitwise_and(ray_start_theta<theta_min, ray_stop_theta<theta_min),:] = np.nan
-    ray_start[np.bitwise_and(ray_start_theta>theta_max, ray_stop_theta>theta_max),:] = np.nan
-    ray_stop[np.bitwise_and(ray_start_theta<theta_min, ray_stop_theta<theta_min),:] = np.nan
-    ray_stop[np.bitwise_and(ray_start_theta>theta_max, ray_stop_theta>theta_max),:] = np.nan
+    ray_start.at[jnp.bitwise_and(ray_start_theta<theta_min, ray_stop_theta<theta_min),:].set(jnp.nan)
+    ray_start.at[jnp.bitwise_and(ray_start_theta>theta_max, ray_stop_theta>theta_max),:].set(jnp.nan)
+    ray_stop.at[jnp.bitwise_and(ray_start_theta<theta_min, ray_stop_theta<theta_min),:].set(jnp.nan)
+    ray_stop.at[jnp.bitwise_and(ray_start_theta>theta_max, ray_stop_theta>theta_max),:].set(jnp.nan)
     
     # Project start/stop points that intersect the r_min sphere
     # This ends up being a quadratic expression
@@ -120,14 +120,15 @@ def orthographic_disk_projection(npix, nray, incl, phi, posang, fov, r_min, r_ma
     c = r_sq - r_min**2
     s = (-b+jnp.sqrt(b**2 - 4*a*c)) / (2*a)
     t = (-b-jnp.sqrt(b**2 - 4*a*c)) / (2*a)
-    ray_start[ray_start_r<r_min,:] = xy_plane_rot[ray_start_r<r_min,:] + t[ray_start_r<r_min,None] * obs_dir[None,:]
-    ray_stop[ray_stop_r<r_min,:] = xy_plane_rot[ray_stop_r<r_min,:] + s[ray_stop_r<r_min,None] * obs_dir[None,:]
+    ray_start.at[ray_start_r<r_min,:].set(xy_plane_rot[ray_start_r<r_min,:] + t[ray_start_r<r_min,None] * obs_dir[None,:])
+    ray_stop.at[ray_stop_r<r_min,:].set(xy_plane_rot[ray_stop_r<r_min,:] + s[ray_stop_r<r_min,None] * obs_dir[None,:])
     
     # Remove points that are within r_min 
-    remove_indices = np.bitwise_and(ray_start_r<r_min, ray_stop_r<r_min)
-    ray_start[remove_indices,:] = ray_stop[remove_indices,:] = np.nan
+    remove_indices = jnp.bitwise_and(ray_start_r<r_min, ray_stop_r<r_min)
+    ray_start.at[remove_indices,:].set(jnp.nan)
+    ray_stop.at[remove_indices,:].set(jnp.nan)
     
-    ray_coords = np.linspace(ray_start, ray_stop, nray, axis=1)
+    ray_coords = jnp.linspace(ray_start, ray_stop, nray, axis=1)
     return ray_coords, obs_dir
 
 def orthographic_projection(npix, nray, incl, phi, posang, fov, z_width):
@@ -179,6 +180,12 @@ def project_volume(volume, coords, bbox):
     return projection
 
 def make_gaussian(size, fov_rad, fwhm_max, fwhm_min, theta, frac=1.0, x_c=0.0, y_c=0.0):
+    """
+    Notes
+    -----
+    This function is modeled after eht-imaging blur_gauss function: 
+    https://github.com/achael/eht-imaging/blob/9ebd83345b62dbcee1fe5267c6e27b786acfe9ff/ehtim/image.py#L1342
+    """
     psize_rad = fov_rad/size
     x = jnp.linspace(-(fov_rad-psize_rad)/2.0, (fov_rad-psize_rad)/2.0, size) - x_c
     y = jnp.linspace(-(fov_rad-psize_rad)/2.0, (fov_rad-psize_rad)/2.0, size) - y_c
@@ -190,20 +197,11 @@ def make_gaussian(size, fov_rad, fwhm_max, fwhm_min, theta, frac=1.0, x_c=0.0, y
     gaussian = jnp.exp(-(yy * cth + xx * sth)**2 / (2 * (frac * sigma_maj)**2) - (xx * cth - yy * sth)**2 / (2 * (frac * sigma_min)**2))
     gaussian = gaussian / jnp.sum(gaussian)
     return gaussian
-    
-def blur_gauss(images, fov_rad, fwhm_max, fwhm_min, theta=0.0, frac=1.0):
-    """
-    Blur image with a Gaussian beam defined by: [fwhm_max, fwhm_min, theta] in radians.
 
-    Notes
-    -----
-    This function is modeled after eht-imaging blur_gauss function: 
-    https://github.com/achael/eht-imaging/blob/9ebd83345b62dbcee1fe5267c6e27b786acfe9ff/ehtim/image.py#L1342
-    """
-    xdim, ydim = images.shape[-2:]
-    assert xdim == ydim, "non square image not supported."
+def gaussian_beam(size, fov_rad, beamsize):
+    beam_area = jnp.pi * beamsize * beamsize / (4*jnp.log(2))
+    beams_per_pix = (fov_rad/size)**2 / beam_area
+    beam = beams_per_pix * make_gaussian(size, fov_rad, beamsize, beamsize, 0, 1.0, 0.0, 0.0)
+    return beam
     
-    gaussian = make_gaussian(xdim, fov_rad, fwhm_max, fwhm_min, theta, frac)
-    blur_vmap = jax.vmap(lambda x: jsp.signal.fftconvolve(x, gaussian, mode='same'))
-    images_blurred = blur_vmap(images)
-    return images_blurred
+fftconvolve_vmap = jax.vmap(lambda x, kernel: jsp.signal.fftconvolve(x, kernel, mode='same'), (0, None))

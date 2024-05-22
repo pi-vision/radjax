@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 import numpy as np
 import grid
@@ -27,7 +28,7 @@ def einstein_coefficients(energy_levels, radiative_transitions, transition=3):
     # extract up and down indices from radiative transition table (e.g. 4,3 for second CO line at 345GHz)
     line_index = transition - 1
     nu0 = radiative_transitions[line_index,4] * ghz
-    up_idx, dn_idx = int(radiative_transitions[line_index,1]-1), int(radiative_transitions[line_index,2]-1)
+    up_idx, dn_idx = jnp.array(radiative_transitions[line_index,1]-1, int), jnp.array(radiative_transitions[line_index,2]-1, int)
     gratio = energy_levels[up_idx,2] / energy_levels[dn_idx,2]
     a_ud = radiative_transitions[line_index, 3]
     b_ud = (cc**2/(2*hh*nu0**3)) * a_ud
@@ -61,7 +62,7 @@ def n_up_down(gas_nd, gas_t, energy_levels, radiative_transitions, transition=3)
     
     # Construct the partition function by linear interpolation in the table
     line_index = transition - 1
-    up_idx, dn_idx = int(radiative_transitions[line_index,1]-1), int(radiative_transitions[line_index,2]-1)
+    up_idx, dn_idx = jnp.array(radiative_transitions[line_index,1]-1, int), jnp.array(radiative_transitions[line_index,2]-1, int)
     dendivk_up = (hh*cc/kk) * (energy_levels[up_idx,1] - energy_levels[0,1])
     dendivk_dn = (hh*cc/kk) * (energy_levels[dn_idx,1] - energy_levels[0,1])
     levelweight_up = energy_levels[up_idx,2]
@@ -71,7 +72,6 @@ def n_up_down(gas_nd, gas_t, energy_levels, radiative_transitions, transition=3)
     n_dn = (gas_nd / pfunc) * jnp.exp(-dendivk_dn/gas_t) * levelweight_dn
     
     return n_up, n_dn
-
 
 def compute_spectral_cube(camera_freqs, gas_v, alpha_tot, n_up, n_dn, a_ud, b_ud, b_du, ray_coords, obs_dir, nu0, pixel_area):
     """
@@ -117,6 +117,18 @@ def compute_spectral_cube(camera_freqs, gas_v, alpha_tot, n_up, n_dn, a_ud, b_ud
     # Conversion from erg/s/cm/cm/ster to Jy/pixel
     image_fluxes_jy =  pixel_area / pc**2 * 1e23 * intensity
     return image_fluxes_jy
+
+# Define vector mapping for speedup on single gpu
+compute_spectral_cube_vmap = jax.vmap(
+    compute_spectral_cube,
+    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None)
+)
+
+# Define a parallel mapping over several gpus
+compute_spectral_cube_pmap = jax.pmap(
+    compute_spectral_cube, axis_name='freq', 
+    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None)
+)
 
 def alpha_total_co(v_turb, gas_t, m_mol):
     """
