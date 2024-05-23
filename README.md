@@ -25,6 +25,6 @@ pip install flax optax diffrax tensorboard tensorboardX
 
 Install additional packages 
 ```
-pip install numpy scipy scikit-learn scikit-image matplotlib jupyterlab nodejs tqdm ipympl ipyvolume mpmath ruamel.yaml corner
+pip install numpy scipy scikit-learn scikit-image matplotlib jupyterlab nodejs tqdm ipympl ipyvolume mpmath ruamel.yaml corner gofish
 conda install emcee h5py ffmpeg
 ```
