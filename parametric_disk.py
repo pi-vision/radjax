@@ -20,17 +20,19 @@ class DiskFlaherty(object):
     -----
     https://iopscience.iop.org/article/10.1088/0004-637X/813/2/99
     """
-    def __init__(self, T_mid1: float, T_atm1: float, q: float, M_star: float, gamma: float, r_in: float, 
-                 r_c: float, M_gas: float, v_turb: float, co_abundance: float, N_dissoc: float, z_q0: float, 
-                 transition: int, m_mol: float, freezeout: float, delta: float, 
+    def __init__(self, T_mid1: float, T_atm1: float, q: float, q_in: float, r_break: float, M_star: float, gamma: float, 
+                 r_in: float, log_r_c: float, M_gas: float, v_turb: float, co_abundance: float, N_dissoc: 
+                 float, z_q0: float, transition: int, m_mol: float, freezeout: float, delta: float, 
                  r_scale: float, molecule_table: str, name: str = 'DiskFlaherty'):
         self.T_mid1 = T_mid1
         self.T_atm1 = T_atm1
         self.q = q
+        self.q_in = q_in
+        self.r_break = r_break
         self.M_star = M_star
         self.gamma = gamma
         self.r_in = r_in
-        self.r_c = r_c
+        self.log_r_c = log_r_c
         self.M_gas = M_gas
         self.v_turb = v_turb
         self.co_abundance = co_abundance
@@ -45,8 +47,9 @@ class DiskFlaherty(object):
         self.name = name
 
     def temperature_profile(self, z, r):
-        T_mid = self.T_mid1 * (r/self.r_scale)**(self.q)
-        T_atm = self.T_atm1 * (r/self.r_scale)**(self.q)
+        q = jnp.where(r<=self.r_break, self.q_in, self.q)
+        T_mid = self.T_mid1 * (r/self.r_scale)**q
+        T_atm = self.T_atm1 * (r/self.r_scale)**q
     
         # The parameter Zq is the height above the midplane at which the gas temperature reaches its maximum value
         z_q = self.z_q0 * (r/self.r_scale)**1.3
@@ -63,11 +66,15 @@ class DiskFlaherty(object):
     def velocity(self, z, r, nd, temperature):
         """Modified Keplerian velocity to account for height and gas pressure above the midplane"""
         v = jnp.sqrt( vsq_keplerian_vertical(z, r, self.M_star) + vsq_pressure_grad(r, nd, temperature, self.m_mol) )
+
+        # If there is a large negative pressure gradient this sqrt might produce nans
+        v = jnp.nan_to_num(v)
+        
         return v
         
     def tree_flatten(self):
-        children = (self.T_mid1,self.T_atm1, self.q, self.M_star, self.gamma, 
-                    self.r_in, self.r_c, self.M_gas, self.v_turb, self.co_abundance, self.N_dissoc, 
+        children = (self.T_mid1,self.T_atm1, self.q, self.q_in, self.r_break, self.M_star, self.gamma, 
+                    self.r_in, self.log_r_c, self.M_gas, self.v_turb, self.co_abundance, self.N_dissoc, 
                     self.z_q0, self.transition, self.m_mol, self.freezeout, self.delta, self.r_scale)
         aux_data = {'molecule_table': self.molecule_table, 'name': self.name}  # static values
         return (children, aux_data)
@@ -76,6 +83,23 @@ class DiskFlaherty(object):
     def tree_unflatten(cls, aux_data, children):
         return cls(*children, **aux_data)
 
+    def update(self, params, values):
+        self.__dict__.update(dict(zip(params, values)))
+        
+    def __copy__(self, name=None):
+        name = self.name if name is None else name
+        return DiskFlaherty(
+            self.T_mid1,self.T_atm1, self.q,  self.q_in, self.r_break, self.M_star, self.gamma, self.r_in, self.log_r_c, 
+            self.M_gas, self.v_turb, self.co_abundance, self.N_dissoc, self.z_q0, self.transition, 
+            self.m_mol, self.freezeout, self.delta, self.r_scale, self.molecule_table, name)
+        
+    def __deepcopy__(self, memo, name=None):
+        name = self.name if name is None else name
+        return DiskFlaherty(copy.deepcopy(
+            self.T_mid1,self.T_atm1, self.q,  self.q_in, self.r_break, self.M_star, self.gamma, self.r_in, self.log_r_c, 
+            self.M_gas, self.v_turb, self.co_abundance, self.N_dissoc, self.z_q0, self.transition, 
+            self.m_mol, self.freezeout, self.delta, self.r_scale, self.molecule_table, name, memo))
+    
 
 class DiskWilliams(object):
     """
@@ -166,14 +190,15 @@ def vsq_pressure_grad(r, nd, temperature, m_mol):
     """Modified Keplerian velocity to account for height and gas pressure above the midplane"""
     rho = m_mol * nd # mass density
     dr = jnp.diff(r * au, axis=1)[0,0]
-    pressure_grad = (nd[:,1:]*kk*temperature[:,1:] - nd[:,:-1]*kk*temperature[:,:-1]) / dr
+    pressure = nd*kk*temperature
+    pressure_grad = (pressure[:,1:] - pressure[:,:-1]) / dr
     pressure_grad = jnp.pad(pressure_grad, pad_width=[(0,0), (1,0)])
     return ((r*au)/rho)*pressure_grad
 
 def azimuthal_velocity(coords, v_phi):
     ray_r = jnp.sqrt(coords[...,0]**2 + coords[...,1]**2)
-    cosp = coords[...,0]/ray_r
-    sinp = coords[...,1]/ray_r
-    vx, vy, vz = v_phi*cosp, v_phi*sinp, jnp.zeros_like(v_phi)
-    velocity = jnp.stack([vx, vy, vz], axis=-1)
+    cosp = coords[...,1]/ray_r
+    sinp = coords[...,0]/ray_r
+    vy, vx, vz = v_phi*cosp, v_phi*sinp, jnp.zeros_like(v_phi)
+    velocity = jnp.stack([vy, vx, vz], axis=-1)
     return velocity

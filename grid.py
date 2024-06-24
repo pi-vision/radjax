@@ -51,6 +51,16 @@ def rotate_coords(coords, incl, phi, posang):
     coords_rot = jnp.rollaxis(jnp.matmul(rot_matrix, jnp.rollaxis(jnp.array(coords), -1, 1)), -1, 1)
     return coords_rot
 
+def rotate_coords_angles(coords, incl, phi):
+    rot_matrix = scipy.spatial.transform.Rotation.from_euler('xz', [incl, phi], degrees=True).as_matrix()
+    coords_rot = jnp.rollaxis(jnp.matmul(rot_matrix, jnp.atleast_3d(jnp.rollaxis(coords, -1, 1))), -1, 1)
+    return coords_rot
+    
+def rotate_coords_vector(coords, vector, angle):
+    rot_matrix = scipy.spatial.transform.Rotation.from_rotvec(angle*vector, degrees=True).as_matrix()
+    coords_rot = jnp.rollaxis(jnp.matmul(rot_matrix, jnp.atleast_3d(jnp.rollaxis(coords, -1, 1))), -1, 1)
+    return coords_rot
+
 def world_to_image_coords(coords, bbox, npix):
     return (coords - bbox[:,0]) * (npix - 1)/(bbox[:,1]-bbox[:,0])
     

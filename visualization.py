@@ -138,7 +138,7 @@ def slider_frame_comparison(frames1, frames2, axis=0, scale='amp'):
     interact(imshow_frame, frame=(0, num_frames-1));
 
 def animate_movies_synced(movie_list, axes, t_axis=0, fov=1.0, vmin=None, vmax=None, cmaps='afmhot', add_ticks=False,
-                   add_colorbars=True, titles=None, fps=10, output=None, flipy=False, bitrate=1e6, dynamic_clim=False):
+                   add_colorbars=True, titles=None, fps=10, output=None, flipy=False, bitrate=1e6, dynamic_clim=False, writer='ffmpeg'):
     
     # Image animation function (called sequentially)
     def animate_frame(i):
@@ -180,6 +180,7 @@ def animate_movies_synced(movie_list, axes, t_axis=0, fov=1.0, vmin=None, vmax=N
     anim = animation.FuncAnimation(fig, animate_frame, frames=num_frames, interval=1e3 / fps)
 
     if output is not None:
-        writer = animation.writers['ffmpeg'](fps=fps, bitrate=bitrate)
+        if writer:
+            writer = animation.writers[writer](fps=fps, bitrate=bitrate)
         anim.save(output, writer=writer)
     return anim

@@ -7,7 +7,7 @@ import grid
 from consts import *
 
 @dataclass
-class Projection:
+class OrthographicProjection:
     name: str
     npix: int
     nray: int
@@ -22,7 +22,20 @@ class Projection:
     linelam: float
     width_kms: float
     v_sys: float = 0.0
-    
+
+@dataclass
+class PinholeProjection:
+    name: str
+    x_sky: float
+    y_sky: float
+    distance: float
+    nray: int
+    incl: float
+    phi: float
+    posang: float
+    z_width: float
+    freqs: float
+
 def compute_camera_freqs(linenlam, width_kms, nu0, v_sys=0.0, num_subfreq=1, subfreq_width=None):
     """
     width_kms: float,
@@ -39,6 +52,50 @@ def compute_camera_freqs(linenlam, width_kms, nu0, v_sys=0.0, num_subfreq=1, sub
         assert subfreq_width, "if num_subfreq>1, subfreq_width should be specified"
         camera_freqs = jnp.linspace(camera_freqs-subfreq_width/2, camera_freqs+subfreq_width/2, num_subfreq, axis=1)
     return camera_freqs
+
+
+def pinhole_disk_projection(x_sky, y_sky, distance, nray, incl, phi, posang, z_width):
+    """
+    Pinhole ray projection
+    The rays are constrained to start and terminate within the disk of thickness z_width
+
+    Parameters
+    ----------
+    x_sky, y_sky: two dimensional arrays,
+        on sky coordinates in [arcsecs]
+    distance: float,
+        distance in [pc]
+    nray: int,
+        Number of point along each ray. 
+    incl: float, 
+        inclination angle [deg]
+    phi: float,
+        azimuthal angle [deg]
+    posang: float,
+        camera roll angle in [deg]
+    z_width: float,
+        Width of the disk in [au]
+    """
+    ny, nx = x_sky.shape
+    obs_dir = jnp.squeeze(grid.rotate_coords_angles(jnp.array([0,0,1]), incl, phi))
+
+    rho = jnp.sqrt(x_sky**2 + y_sky**2) * arcsec
+    theta = jnp.arctan2(y_sky, x_sky)
+    
+    ray_x_dir = rho * jnp.cos(theta)
+    ray_y_dir = rho * jnp.sin(theta)
+    ray_z_dir = jnp.ones_like(ray_x_dir)
+    
+    ray_dir = jnp.stack((ray_y_dir, ray_x_dir, ray_z_dir), axis=-1).reshape(ny*nx, 3)
+    ray_dir = grid.rotate_coords_vector(grid.rotate_coords_angles(ray_dir, incl, -phi), obs_dir, -posang)
+    
+    s = (0.5 * z_width*au - distance*pc * obs_dir[2] ) / ray_dir[...,2]
+    t = (-0.5 * z_width*au - distance*pc * obs_dir[2] ) / ray_dir[...,2]
+    ray_start = distance*pc * obs_dir + s[...,None] * ray_dir
+    ray_stop = distance*pc * obs_dir + t[...,None] * ray_dir
+    
+    ray_coords = jnp.linspace(ray_start, ray_stop, nray, axis=1).reshape(ny, nx, nray, 3)
+    return ray_coords, obs_dir
 
 def orthographic_disk_projection(npix, nray, incl, phi, posang, fov, r_min, r_max, theta_min, theta_max):
     """
