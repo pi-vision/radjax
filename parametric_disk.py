@@ -21,8 +21,8 @@ class DiskFlaherty(object):
     https://iopscience.iop.org/article/10.1088/0004-637X/813/2/99
     """
     def __init__(self, T_mid1: float, T_atm1: float, q: float, q_in: float, r_break: float, M_star: float, gamma: float, 
-                 r_in: float, log_r_c: float, M_gas: float, v_turb: float, co_abundance: float, N_dissoc: 
-                 float, z_q0: float, transition: int, m_mol: float, freezeout: float, delta: float, 
+                 r_in: float, log_r_c: float, M_gas: float, v_turb: float, co_abundance: float, N_dissoc_lo: 
+                 float, N_dissoc_hi: float, z_q0: float, transition: int, m_mol: float, freezeout: float, delta: float, 
                  r_scale: float, molecule_table: str, name: str = 'DiskFlaherty'):
         self.T_mid1 = T_mid1
         self.T_atm1 = T_atm1
@@ -36,7 +36,8 @@ class DiskFlaherty(object):
         self.M_gas = M_gas
         self.v_turb = v_turb
         self.co_abundance = co_abundance
-        self.N_dissoc = N_dissoc
+        self.N_dissoc_lo = N_dissoc_lo
+        self.N_dissoc_hi = N_dissoc_hi
         self.z_q0 = z_q0
         self.molecule_table = molecule_table
         self.transition = transition
@@ -59,7 +60,11 @@ class DiskFlaherty(object):
         return temperature
 
     def co_abundance_profile(self, N_h2, temperature):
-        co_region = jnp.bitwise_and(temperature>self.freezeout, 0.706*N_h2>self.N_dissoc)
+        
+        co_region = jnp.bitwise_and(
+            temperature>self.freezeout, 
+            jnp.bitwise_and(0.706*N_h2>self.N_dissoc_lo, 0.706*N_h2<self.N_dissoc_hi)
+        )
         abundance = jnp.where(co_region, self.co_abundance, 0.0)
         return abundance 
 
@@ -74,8 +79,8 @@ class DiskFlaherty(object):
         
     def tree_flatten(self):
         children = (self.T_mid1,self.T_atm1, self.q, self.q_in, self.r_break, self.M_star, self.gamma, 
-                    self.r_in, self.log_r_c, self.M_gas, self.v_turb, self.co_abundance, self.N_dissoc, 
-                    self.z_q0, self.transition, self.m_mol, self.freezeout, self.delta, self.r_scale)
+                    self.r_in, self.log_r_c, self.M_gas, self.v_turb, self.co_abundance, self.N_dissoc_lo, 
+                    self.N_dissoc_hi, self.z_q0, self.transition, self.m_mol, self.freezeout, self.delta, self.r_scale)
         aux_data = {'molecule_table': self.molecule_table, 'name': self.name}  # static values
         return (children, aux_data)
 
@@ -97,7 +102,7 @@ class DiskFlaherty(object):
         name = self.name if name is None else name
         return DiskFlaherty(copy.deepcopy(
             self.T_mid1,self.T_atm1, self.q,  self.q_in, self.r_break, self.M_star, self.gamma, self.r_in, self.log_r_c, 
-            self.M_gas, self.v_turb, self.co_abundance, self.N_dissoc, self.z_q0, self.transition, 
+            self.M_gas, self.v_turb, self.co_abundance, self.N_dissoc_lo, self.N_dissoc_hi, self.z_q0, self.transition, 
             self.m_mol, self.freezeout, self.delta, self.r_scale, self.molecule_table, name, memo))
     
 

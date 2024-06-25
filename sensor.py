@@ -236,29 +236,19 @@ def project_volume(volume, coords, bbox):
     projection = jnp.sum(volume_zero_order * ds, axis=-1)
     return projection
 
-def make_gaussian(size, fov_rad, fwhm_max, fwhm_min, theta, frac=1.0, x_c=0.0, y_c=0.0):
+def beam(dpix, bmaj, bmin, bpa, scale=1.0, x_c=0.0, y_c=0.0):
     """
     Notes
     -----
     This function is modeled after eht-imaging blur_gauss function: 
     https://github.com/achael/eht-imaging/blob/9ebd83345b62dbcee1fe5267c6e27b786acfe9ff/ehtim/image.py#L1342
     """
-    psize_rad = fov_rad/size
-    x = jnp.linspace(-(fov_rad-psize_rad)/2.0, (fov_rad-psize_rad)/2.0, size) - x_c
-    y = jnp.linspace(-(fov_rad-psize_rad)/2.0, (fov_rad-psize_rad)/2.0, size) - y_c
-    xx, yy = jnp.meshgrid(x, y, indexing='ij')
-    sigma_maj = fwhm_max / (2. * jnp.sqrt(2. * jnp.log(2.)))
-    sigma_min = fwhm_min / (2. * jnp.sqrt(2. * jnp.log(2.)))
-    cth = jnp.cos(theta)
-    sth = jnp.sin(theta)
-    gaussian = jnp.exp(-(yy * cth + xx * sth)**2 / (2 * (frac * sigma_maj)**2) - (xx * cth - yy * sth)**2 / (2 * (frac * sigma_min)**2))
-    gaussian = gaussian / jnp.sum(gaussian)
-    return gaussian
-
-def gaussian_beam(size, fov_rad, beamsize):
-    beam_area = jnp.pi * beamsize * beamsize / (4*jnp.log(2))
-    beams_per_pix = (fov_rad/size)**2 / beam_area
-    beam = beams_per_pix * make_gaussian(size, fov_rad, beamsize, beamsize, 0, 1.0, 0.0, 0.0)
-    return beam
+    from astropy.convolution import Gaussian2DKernel
+    
+    bmaj = scale * bmaj / dpix / 2.355
+    bmin = scale * bmin / dpix / 2.355
+    kernel = jnp.array(Gaussian2DKernel(x_stddev=bmin, y_stddev=bmaj, theta=np.radians(bpa)).array)
+    
+    return kernel
     
 fftconvolve_vmap = jax.vmap(lambda x, kernel: jsp.signal.fftconvolve(x, kernel, mode='same'), (0, None))
