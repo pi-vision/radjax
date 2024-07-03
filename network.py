@@ -12,23 +12,23 @@ class PixelPredictor(nn.Module):
     posenc_deg: int = 3
     posenc_var: float = 0.0
     net_depth: int = 4
-    net_width: int = 128
-    activation: Callable[..., Any] = nn.sigmoid
+    net_width: int = 64
+    activation: Callable[..., Any] = nn.relu
     out_channel: int = 1
     out_activation: Callable[..., Any] = nn.sigmoid
     do_skip: bool = True
-    sigmoid_offset: float = 10.0
+    min_val: float = 0.0
+    max_val: float = 1.0
+    offset: float = 0.0
     
     def init_params(self, coords, seed=1):
         params = self.init(jax.random.PRNGKey(seed), coords)['params']
-        return params.unfreeze() # TODO(pratul): this unfreeze feels sketchy
+        return params
 
     def init_state(self, params, num_iters=5000, lr_init=1e-4, lr_final=1e-6, checkpoint_dir=''):
         lr = optax.polynomial_schedule(lr_init, lr_final, 1, num_iters)
         tx = optax.adam(learning_rate=lr)
         state = train_state.TrainState.create(apply_fn=self.apply, params=params, tx=tx) 
-        # Replicate state for multiple gpus
-        state = flax.jax_utils.replicate(state)
         return state
     
     @nn.compact
@@ -44,9 +44,9 @@ class PixelPredictor(nn.Module):
             net_output = pixel_mlp(input)
             if self.out_channel == 1:
                 net_output = net_output[..., 0]
+
         
-            offset = self.sigmoid_offset if self.out_activation.__name__ == 'sigmoid' else 0
-            pixels = self.out_activation(net_output - offset)
+            pixels = self.out_activation(net_output-self.offset)*(self.max_val - self.min_val) + self.min_val
             return pixels
         pixels = predict_pixels(coords)
         return pixels
@@ -124,58 +124,11 @@ def posenc(x, deg):
                      list(x.shape[:-1]) + [-1])
     four_feat = safe_sin(jnp.concatenate([xb, xb + 0.5 * jnp.pi], axis=-1))
     return jnp.concatenate([x] + [four_feat], axis=-1)
-
-
-def integrated_posenc(x, max_deg, x_cov, min_deg=0):
-    """
-    Encode `x` with sinusoids scaled by 2^[min_deg:max_deg-1].
-
-    Parameters
-    ----------
-    x: jnp.ndarray, variables to be encoded. Should
-      be in [-pi, pi]. 
-    max_deg: int, the max degree of the encoding.
-    x_cov: jnp.ndarray, covariance matricfes for `x`.
-    min_deg: int, the min degree of the encoding. default=0.
-
-    Returns
-    -------
-    encoded: jnp.ndarray, encoded variables.
-    """
-    if jnp.isscalar(x_cov):
-        x_cov = jnp.full_like(x, x_cov)
-    scales = 2**jnp.arange(min_deg, max_deg)
-    shape = list(x.shape[:-1]) + [-1]
-    y = jnp.reshape(x[..., None, :] * scales[:, None], shape)
-    y_var = jnp.reshape(x_cov[..., None, :] * scales[:, None]**2, shape)
-
-    return expected_sin(
-      jnp.concatenate([y, y + 0.5 * jnp.pi], axis=-1),
-      jnp.concatenate([y_var] * 2, axis=-1))
-
-def expected_sin(x, x_var):
-    # When the variance is wide, shrink sin towards zero.
-    y = jnp.exp(-0.5 * x_var) * jnp.sin(x)
-    return y
-
     
 def shard(xs):
     """Split data into shards for multiple devices along the first dimension."""
     return jax.tree_map(lambda x: x.reshape((jax.local_device_count(), -1) + x.shape[1:]), xs)
 
-"""
-def shard(xs, overlap=0):
-    n_gpus = jax.local_device_count()
-    if xs.shape[0] % n_gpus != overlap:
-        raise AttributeError
-    if overlap == 0:
-        output = jax.tree_map(lambda x: x.reshape((n_gpus, -1) + x.shape[1:]), xs)    
-    elif overlap > 0:
-        output = jax.tree_map(lambda x: x.reshape((n_gpus, x.shape[0] // n_gpus) + x.shape[1:]), xs[:-overlap])
-        output = jnp.concatenate((output, jnp.concatenate((output[1:,0], xs[-1][None]))[:,None]), axis=1)
-
-    return output
-"""   
 
 safe_sin = lambda x: jnp.sin(x % (100 * jnp.pi))
 

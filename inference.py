@@ -65,7 +65,7 @@ class DiskSampler(object):
         
         # Einstein coefficient for spontaneous emission from level u to level d
         n_up, n_dn = line_rte.n_up_down(gas_nd, gas_t, self.energy_levels, self.radiative_transitions, transition=disk.transition)
-        alpha_tot = line_rte.alpha_total_co(disk.v_turb, gas_t, disk.m_mol)
+        alpha_tot = line_rte.alpha_total_co(disk.v_turb, gas_t)
 
         model = jnp.nan_to_num(line_rte.compute_spectral_cube(
             freqs, gas_v, alpha_tot, n_up, n_dn, self.a_ud, self.b_ud, self.b_du, self.ray_coords, self.obs_dir, self.nu0, self.pixel_area

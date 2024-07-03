@@ -70,11 +70,10 @@ class DiskFlaherty(object):
 
     def velocity(self, z, r, nd, temperature):
         """Modified Keplerian velocity to account for height and gas pressure above the midplane"""
-        v = jnp.sqrt( vsq_keplerian_vertical(z, r, self.M_star) + vsq_pressure_grad(r, nd, temperature, self.m_mol) )
-
+        # v = jnp.sqrt( vsq_keplerian_vertical(z, r, self.M_star) + vsq_pressure_grad(r, nd, temperature, self.m_mol) )
+        v = jnp.sqrt( vsq_keplerian_vertical(z, r, self.M_star) )
         # If there is a large negative pressure gradient this sqrt might produce nans
-        v = jnp.nan_to_num(v)
-        
+        # v = jnp.nan_to_num(v)
         return v
         
     def tree_flatten(self):
@@ -104,65 +103,6 @@ class DiskFlaherty(object):
             self.T_mid1,self.T_atm1, self.q,  self.q_in, self.r_break, self.M_star, self.gamma, self.r_in, self.log_r_c, 
             self.M_gas, self.v_turb, self.co_abundance, self.N_dissoc_lo, self.N_dissoc_hi, self.z_q0, self.transition, 
             self.m_mol, self.freezeout, self.delta, self.r_scale, self.molecule_table, name, memo))
-    
-
-class DiskWilliams(object):
-    """
-    A parameteric disk model based on Williams et al. (2014)
-    
-    Parameters
-    ----------
-    molecule_table: path to the molecular table (e.g. molecule_12c16o.inp)
-    transition: rotational transition index (e.g. 3 is CO(3-2) at ~345 GHz)
-    freezeout: Kelvin. Freezeout temperature of the molecule (e.g. 20K for CO)
-    delta: describe the steepness of the profile (multiplies the power of the sinusoid)
-    r_scale: scaling in AU (default = 150AU)
-
-    Notes
-    -----
-    https://iopscience.iop.org/article/10.1088/0004-637X/788/1/59
-    """
-    def __init__(self, name: str, T_mid1: float, T_atm1: float, q: float, M_star: float, gamma: float, r_in: float, 
-                 r_c: float, M_gas: float, alpha_turb: float, co_abundance: float, N_dissoc: float, 
-                 molecule_table: str, transition: int, m_mol: float = 2.37*m_h, freezeout: float = 20.0, delta: float = 2, r_scale: float = 1.0):
-        self.name = name
-        self.T_mid1 = T_mid1
-        self.T_atm1 = T_atm1
-        self.q = q
-        self.M_star = M_star
-        self.gamma = gamma
-        self.r_in = r_in
-        self.r_c = r_c
-        self.M_gas = M_gas
-        self.alpha_turb = alpha_turb
-        self.co_abundance = co_abundance
-        self.N_dissoc = N_dissoc
-        self.z_q0 = z_q0
-        self.molecule_table = molecule_table
-        self.transition = transition
-        self.m_mol = m_mol
-        self.freezeout = freezeout
-        self.delta = delta
-        self.r_scale = r_scale
-
-    def temperature_profile(self, z, r):
-        T_mid = self.T_mid1 * (r/self.r_scale)**(-self.q)
-        T_atm = self.T_atm1 * (r/self.r_scale)**(-self.q)
-    
-        # The temperature profile is a combination of T_mid, T_atm 
-        # z_q describes the hight at which the disk transitions to the atmopheric value.
-        # H_p is the pressure scale hight derived from the midplane tempertaure
-        H_p = (kk * T_mid * (r * au)**3 / (G*M_star*m_mol))**0.5
-        z_q = 4*H_p/au
-        
-        # The temperature profile is a combination of T_mid, T_atm 
-        temperature = np.where(np.abs(z)<z_q, T_mid + (T_atm - T_mid)*jnp.sin(jnp.pi*z/(2*z_q))**(2*self.delta), T_atm)
-        return temperature
-
-    def co_abundance_profile(self, N_h2, temperature):
-        co_region = jnp.bitwise_and(temperature>self.freezeout, N_h2>self.N_dissoc)
-        abundance = jnp.where(co_region, self.co_abundance, 0.0)
-        return abundance 
 
 def number_density_profile(z, r, temperature, gamma, r_in, r_c, M_gas, M_star, m_mol):
     sigma_0 = (2-gamma) * (M_gas / (2*jnp.pi*(r_c*au)**2)) * jnp.exp(r_in / r_c)**(2-gamma)

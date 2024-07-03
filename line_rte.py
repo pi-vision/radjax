@@ -105,7 +105,7 @@ def compute_spectral_cube(camera_freqs, gas_v, alpha_tot, n_up, n_dn, a_ud, b_ud
     # Second order integration of the source
     # Notes: https://www.ita.uni-heidelberg.de/~dullemond/software/radmc-3d/manual_radmc3d/imagesspectra.html#sec-second-order
     s_nu = j_nu / (a_nu + 1e-30)   # Radmc3d has +1e-99 but this results in nans
-    beta = (dtau - 1 + jnp.exp(-dtau)) / dtau
+    beta = (dtau - 1 + jnp.exp(-dtau)) / (dtau + 1e-30)
     beta = jnp.where(dtau > 1e-6, beta, 0.5*dtau)
     source_2nd = (1 - jnp.exp(-dtau) - beta) * s_nu[...,:-1] + beta * s_nu[...,1:]
     source_2nd = jnp.where(source_2nd < source_1st, source_2nd, source_1st)
@@ -130,7 +130,7 @@ compute_spectral_cube_pmap = jax.pmap(
     in_axes=(0, None, None, None, None, None, None, None, None, None, None, None)
 )
 
-def alpha_total_co(v_turb, gas_t, m_mol):
+def alpha_total_co(v_turb, gas_t):
     """
     Compute the total line broadening due to thermal and turbulence velocities
 
@@ -140,12 +140,9 @@ def alpha_total_co(v_turb, gas_t, m_mol):
         turbulence broadening scaled by the speed of sound.
     gas_t: jnp.array
         Temperature field (K)
-    m_mol: float,
-        Molecular weight
     """
     alpha_therm_sq = 2*kk*gas_t / m_co
-    cs_sq = 2*kk*gas_t / m_mol  # local speed of sound
-    alpha_tot = jnp.sqrt(alpha_therm_sq + v_turb**2 * cs_sq)
+    alpha_tot = jnp.sqrt(alpha_therm_sq * (1 + v_turb**2))
     return alpha_tot
     
 def load_molecular_tables(path):
