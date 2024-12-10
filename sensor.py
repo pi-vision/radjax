@@ -237,11 +237,7 @@ def project_volume(volume, coords, bbox):
     return projection
 
 def beam(dpix, bmaj, bmin, bpa, scale=1.0, x_c=0.0, y_c=0.0):
-    """
-    Notes
-    -----
-    This function is modeled after eht-imaging blur_gauss function: 
-    https://github.com/achael/eht-imaging/blob/9ebd83345b62dbcee1fe5267c6e27b786acfe9ff/ehtim/image.py#L1342
+    """›
     """
     from astropy.convolution import Gaussian2DKernel
     

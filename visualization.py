@@ -184,3 +184,15 @@ def animate_movies_synced(movie_list, axes, t_axis=0, fov=1.0, vmin=None, vmax=N
             writer = animation.writers[writer](fps=fps, bitrate=bitrate)
         anim.save(output, writer=writer)
     return anim
+
+def plot_disk_profile(ax, r_disk, z_disk, temperature, nd_h2, abundance_co, co_abundance, temp_levels=[20,40,60,80,100,120], vmin=3, vmax=10):
+    im = ax.imshow(np.log10(nd_h2), origin='lower', cmap='turbo', extent=[r_disk.min(), r_disk.max(), z_disk.min(), z_disk.max()], vmin=vmin, vmax=vmax);
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='2%', pad=0.1)
+    cbar = plt.colorbar(im, cax=cax)
+    cbar.set_label(r'$\log_{10} n(H_2)$', fontsize=12)
+    cp = ax.contour(r_disk, z_disk, temperature, temp_levels, colors='white')
+    ax.clabel(cp, temp_levels, inline=1, fontsize=12);
+    cp = ax.contour(r_disk, z_disk, abundance_co, levels=[co_abundance/2], colors='black')
+    ax.clabel(cp, levels=[co_abundance/2], fmt='CO', inline=1, fontsize=12);
+    ax.set_title('Disk profile: density and temprature', fontsize=14)
