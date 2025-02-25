@@ -1,170 +1,212 @@
 import jax
-import numpy as np
 import jax.numpy as jnp
 import jax.scipy as jsp
-import functools
-import sensor, grid, line_rte, parametric_disk
+
+import numpy as np
+
+# local imports
+import sensor
+import grid
+import line_rte
+import parametric_disk 
 from consts import *
-from network import shard
-import copy
 
-@jax.tree_util.register_pytree_node_class
-class DiskSampler(object):
-    def __init__(self, z_disk, r_disk, bbox, pixel_area, ray_coords, ray_coords_polar, obs_dir, beam, 
-                 energy_levels, radiative_transitions, sigma, disk, stride, params):
-        self.z_disk = z_disk
-        self.r_disk = r_disk
-        self.bbox = bbox
-        self.pixel_area = pixel_area
-        self.ray_coords = ray_coords
-        self.ray_coords_polar = ray_coords_polar
-        self.obs_dir = obs_dir
-        self.beam = beam
-        self.energy_levels = energy_levels
-        self.radiative_transitions = radiative_transitions
-        self.sigma = sigma
-        self.disk = disk
-        self.stride = stride
-        self.params = params
-        self.param_names = list(params.keys())
-        self.bounds = np.array(list(params.values())).T
-        self.nu0, self.a_ud, self.b_ud, self.b_du = line_rte.einstein_coefficients(energy_levels, radiative_transitions, transition=disk.transition)
+###############################################################################
+# Example: Setting up a "Sampler" dictionary and a set of functions that
+# operate on that data to compute priors, likelihoods, etc.
 
-    def sample_p0(self, params, nwalkers, seed=None):
-        np.random.seed(seed)
-        print('setting inital seed to: {}'.format(np.random.get_state()[1][0]))
-        ndim = len(params)
-        return np.random.uniform(*self.bounds, (nwalkers, ndim))
+# Dictionary for index-param name:
+DISK_PARAM_INDEX = {
+    'T_mid1': 0,
+    'T_atm1': 1,
+    'q': 2,
+    'q_in': 3,
+    'r_break': 4,
+    'M_star': 5,
+    'gamma': 6,
+    'r_in': 7,
+    'log_r_c': 8,
+    'M_gas': 9,
+    'v_turb': 10,
+    'co_abundance': 11,
+    'N_dissoc': 12,
+    'N_desorp': 13,
+    'z_q0': 14,
+    'transition': 15,
+    'm_mol': 16,
+    'freezeout': 17,
+    'delta': 18,
+    'r_scale': 19
+}
 
-    def logprior(self, x):
-        condition = jnp.logical_and(x>=self.bounds[0],x<=self.bounds[1])
-        return jnp.sum(jnp.where(condition, 0, -jnp.inf))
+# Reverse key-value pair for DISK_PARAM_INDEX
+REV_DISK_PARAM_INDEX = {index: name for name, index in DISK_PARAM_INDEX.items()}
+###############################################################################
 
-    def loglikelihood(self, x, y, freqs):
-        disk = self.disk
-        disk.update(self.param_names, x)
-        
-        temperature = disk.temperature_profile(self.z_disk, self.r_disk)
-        nd_h2 = parametric_disk.number_density_profile(
-            self.z_disk, self.r_disk, temperature, disk.gamma, disk.r_in, 10**disk.log_r_c, disk.M_gas, disk.M_star, disk.m_mol
-        )
-        velocity_az = -disk.velocity(self.z_disk, self.r_disk, nd_h2, temperature)
-        
-        # Compute the column integrated density N(h2) (units of 1/cm^2)
-        N_h2 = parametric_disk.surface_density(self.z_disk, nd_h2)
-        
-        # Compute the relative abundance of co
-        abundance_co = disk.co_abundance_profile(N_h2, temperature)
-        nd_co = abundance_co * nd_h2
-        
-        # Interpolate dataset along the ray coordinates
-        gas_nd = grid.interpolate_scalar(nd_co, self.ray_coords_polar, self.bbox)
-        gas_t  = grid.interpolate_scalar(temperature, self.ray_coords_polar, self.bbox, cval=1e-10)
-        gas_v_az = grid.interpolate_scalar(velocity_az, self.ray_coords_polar, self.bbox)
-        gas_v = parametric_disk.azimuthal_velocity(self.ray_coords, gas_v_az)
-        
-        # Einstein coefficient for spontaneous emission from level u to level d
-        n_up, n_dn = line_rte.n_up_down(gas_nd, gas_t, self.energy_levels, self.radiative_transitions, transition=disk.transition)
-        alpha_tot = line_rte.alpha_total_co(disk.v_turb, gas_t)
+def create_sampler(
+    z_disk, r_disk, bbox, pixel_area, ray_coords, ray_coords_polar, obs_dir,
+    beam, energy_levels, radiative_transitions, sigma, disk_params, posterior_params, stride=None    
+):
+    """
+    Return a dict containing all the static data needed for the MCMC sampling.
+    """
+    param_names = list(posterior_params.keys())
 
-        model = jnp.nan_to_num(line_rte.compute_spectral_cube(
-            freqs, gas_v, alpha_tot, n_up, n_dn, self.a_ud, self.b_ud, self.b_du, self.ray_coords, self.obs_dir, self.nu0, self.pixel_area
-        ))
-        model = sensor.fftconvolve_vmap(model, self.beam)
-        logpdf = jsp.stats.norm.logpdf(y[:,::self.stride,::self.stride], model[:,::self.stride,::self.stride], self.sigma)
-        return jnp.sum(logpdf)
-        
-    @jax.jit
-    def logprob(self, x, y, freqs):
-        return self.logprior(x) + self.loglikelihood(x, y, freqs)
+    # Pre-compute line RTE constants
+    nu0, a_ud, b_ud, b_du = line_rte.einstein_coefficients(
+        energy_levels, radiative_transitions, transition=disk_params['transition']
+    )
+
+    sampler_dict = {
+        'z_disk': z_disk,
+        'r_disk': r_disk,
+        'bbox': bbox,
+        'pixel_area': pixel_area,
+        'ray_coords': ray_coords,
+        'ray_coords_polar': ray_coords_polar,
+        'obs_dir': obs_dir,
+        'beam': beam,
+        'energy_levels': energy_levels,
+        'radiative_transitions': radiative_transitions,
+        'sigma': sigma,
+        'disk_params': disk_params,
+        'posterior_params': posterior_params,
+        'stride': stride,
+        'nu0': nu0,
+        'a_ud': a_ud,
+        'b_ud': b_ud,
+        'b_du': b_du
+    }
+    return sampler_dict
+
+def sample_p0(nwalkers, posterior_params, seed=None):
+    """
+    Sample initial positions for MCMC walkers uniformly from `p0_bounds`.
+    """
+    np.random.seed(seed)
+    ndim = len(posterior_params)
+    p0 = np.empty((nwalkers, ndim), dtype=float)
+
+    # The integer keys might be 0..N-1 or any order, so let's collect them in sorted order:
+    sorted_indices = sorted(posterior_params.keys())
     
-    def tree_flatten(self):
-        children = (self.z_disk, self.r_disk, self.bbox, self.pixel_area, self.ray_coords, 
-                    self.ray_coords_polar, self.obs_dir, self.beam, self.energy_levels, 
-                    self.radiative_transitions, self.sigma, self.disk)
-        aux_data = {'stride': self.stride, 'params': self.params}  # static values
-        return (children, aux_data)
+    for col, i in enumerate(sorted_indices):
+        lo, hi = posterior_params[i]["p0_range"]
+        p0[:, col] = np.random.uniform(lo, hi, size=nwalkers)
 
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        return cls(*children, **aux_data) 
+    return p0
 
-@jax.tree_util.register_pytree_node_class
-class DiskSamplerTurbulence(object):
-    def __init__(self, z_disk, r_disk, bbox, pixel_area, ray_coords, ray_coords_polar, obs_dir, beam, 
-                 energy_levels, radiative_transitions, sigma, disk, params):
-        self.z_disk = z_disk
-        self.r_disk = r_disk
-        self.bbox = bbox
-        self.pixel_area = pixel_area
-        self.ray_coords = ray_coords
-        self.ray_coords_polar = ray_coords_polar
-        self.obs_dir = obs_dir
-        self.beam = beam
-        self.energy_levels = energy_levels
-        self.radiative_transitions = radiative_transitions
-        self.sigma = sigma
-        self.disk = disk
-        self.params = params
-        self.param_names = list(params.keys())
-        self.bounds = np.array([p['bounds'] for p in params.values()]).T
-        self.param_ranges = np.array([p['p0_range'] for p in params.values()]).T
-        self.nu0, self.a_ud, self.b_ud, self.b_du = line_rte.einstein_coefficients(energy_levels, radiative_transitions, transition=disk.transition)
+def logprior(params, sampler_dict):
+    """
+    Check that 'params' is within the bounds. If so, return 0; else -inf.
+    """
+    posterior_params = sampler_dict['posterior_params']
+    sorted_indices = sorted(posterior_params.keys())
 
-    def sample_p0(self, params, nwalkers, seed=None):
-        np.random.seed(seed)
-        print('setting inital seed to: {}'.format(np.random.get_state()[1][0]))
-        param_ranges = np.array([p['p0_range'] for p in params.values()]).T
-        ndim = len(params)
-        return np.random.uniform(*param_ranges, (nwalkers, ndim))
+    # uniform prior
+    lp = 0.0
+    for col, i in enumerate(sorted_indices):
+        lo, hi = posterior_params[i]["bounds"]
+        in_bounds = jnp.logical_and(params[col] >= lo, params[col] <= hi)
+        lp += jnp.where(in_bounds, 0.0, -jnp.inf)
+    return lp
 
-    def logprior(self, x):
-        condition = jnp.logical_and(x>=self.bounds[0],x<=self.bounds[1])
-        return jnp.sum(jnp.where(condition, 0, -jnp.inf))
 
-    def loglikelihood(self, x, y, freqs):
-        disk = self.disk
-        disk.__dict__.update(dict(zip(self.param_names, x)))
-        
-        temperature = disk.temperature_profile(self.z_disk, self.r_disk)
-        nd_h2 = parametric_disk.number_density_profile(self.z_disk, self.r_disk, temperature, disk.gamma, disk.r_in, disk.r_c, disk.M_gas, disk.M_star, disk.m_mol)
-        velocity_az = -disk.velocity(self.z_disk, self.r_disk, nd_h2, temperature)
-        
-        # Compute the column integrated density N(h2) (units of 1/cm^2)
-        N_h2 = parametric_disk.surface_density(self.z_disk, nd_h2)
-        
-        # Compute the relative abundance of co
-        abundance_co = disk.co_abundance_profile(N_h2, temperature)
-        nd_co = abundance_co * nd_h2
-        
-        # Interpolate dataset along the ray coordinates
-        gas_nd = grid.interpolate_scalar(nd_co, self.ray_coords_polar, self.bbox)
-        gas_t  = grid.interpolate_scalar(temperature, self.ray_coords_polar, self.bbox, cval=1e-10)
-        gas_v_az = grid.interpolate_scalar(velocity_az, self.ray_coords_polar, self.bbox)
-        gas_v = parametric_disk.azimuthal_velocity(self.ray_coords, gas_v_az)
-        
-        # Einstein coefficient for spontaneous emission from level u to level d
-        n_up, n_dn = line_rte.n_up_down(gas_nd, gas_t, self.energy_levels, self.radiative_transitions, transition=disk.transition)
-        alpha_tot = line_rte.alpha_total_co(disk.v_turb, gas_t, disk.m_mol)
-
-        model = jnp.nan_to_num(line_rte.compute_spectral_cube(
-            freqs, gas_v, alpha_tot, n_up, n_dn, self.a_ud, self.b_ud, self.b_du, self.ray_coords, self.obs_dir, self.nu0, self.pixel_area
-        ))
-        model = sensor.fftconvolve_vmap(model, self.beam)
-        logpdf = jsp.stats.norm.logpdf(y, model, self.sigma)
-        return jnp.sum(logpdf)
-        
-    @jax.jit
-    def logprob(self, x, y, freqs):
-        return self.logprior(x) + self.loglikelihood(x, y, freqs)
+def loglikelihood(params, y, freqs, sampler_dict):
+    """
+    Evaluate the log-likelihood by building the disk model and comparing
+    to the data.
+    """
+    disk_params = sampler_dict['disk_params'].copy()
+    posterior_params = sampler_dict['posterior_params']
+    sorted_indices = sorted(posterior_params.keys())
     
-    def tree_flatten(self):
-        children = (self.z_disk, self.r_disk, self.bbox, self.pixel_area, self.ray_coords, 
-                    self.ray_coords_polar, self.obs_dir, self.beam, self.energy_levels, 
-                    self.radiative_transitions, self.sigma, self.disk)
-        aux_data = {'params': self.params}  # static values
-        return (children, aux_data)
+    # For each col in the 'params' array, figure out which disk param index it corresponds to:
+    for col, param_index in enumerate(sorted_indices):
+        name = REV_DISK_PARAM_INDEX[param_index]
+#         print(f'updated {disk_params[name]} to {params[col]}')
+        disk_params[name] = params[col]
+        
 
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        return cls(*children, **aux_data)
+    # 1) Build temperature field
+    temperature = parametric_disk.temperature_profile(
+        sampler_dict['z_disk'], sampler_dict['r_disk'], disk_params
+    )
+
+    # 2) Build H2 number density
+    nd_h2 = parametric_disk.number_density_profile(
+        sampler_dict['z_disk'],
+        sampler_dict['r_disk'],
+        temperature,
+        disk_params['gamma'],
+        disk_params['r_in'],
+        10**disk_params['log_r_c'],
+        disk_params['M_gas'],
+        disk_params['M_star'],
+        disk_params['m_mol']
+    )
+
+    # 3) Build velocities
+    velocity_az = -parametric_disk.velocity_profile(
+        sampler_dict['z_disk'], sampler_dict['r_disk'],
+        nd_h2, temperature, disk_params
+    )
+
+    # 4) Compute column integrated density N_h2
+    N_h2 = parametric_disk.surface_density(sampler_dict['z_disk'], nd_h2)
+
+    # 5) Build the CO abundance
+    abundance_co = parametric_disk.co_abundance_profile(N_h2, temperature, disk_params)
+    nd_co = abundance_co * nd_h2
+
+    # 6) Interpolate onto ray-coordinates
+    gas_nd = grid.interpolate_scalar(
+        nd_co, sampler_dict['ray_coords_polar'], sampler_dict['bbox']
+    )
+    gas_t = grid.interpolate_scalar(
+        temperature, sampler_dict['ray_coords_polar'], sampler_dict['bbox'], cval=1e-10
+    )
+    gas_v_az = grid.interpolate_scalar(
+        velocity_az, sampler_dict['ray_coords_polar'], sampler_dict['bbox']
+    )
+    gas_v = parametric_disk.azimuthal_velocity(sampler_dict['ray_coords'], gas_v_az)
+
+    # 7) Einstein coefficients
+    n_up, n_dn = line_rte.n_up_down(
+        gas_nd,
+        gas_t,
+        sampler_dict['energy_levels'],
+        sampler_dict['radiative_transitions'],
+        transition=disk_params['transition']
+    )
+    alpha_tot = line_rte.alpha_total_co(disk_params['v_turb'], gas_t)
+
+    # 8) Compute the model data cube
+    model_cube = line_rte.compute_spectral_cube(
+        freqs, gas_v, alpha_tot, n_up, n_dn,
+        sampler_dict['a_ud'], sampler_dict['b_ud'], sampler_dict['b_du'],
+        sampler_dict['ray_coords'], sampler_dict['obs_dir'],
+        sampler_dict['nu0'], sampler_dict['pixel_area']
+    )
+
+    # 9) Convolve model with the beam
+    model_cube = jnp.nan_to_num(model_cube)
+    model_cube = sensor.fftconvolve_vmap(model_cube, sampler_dict['beam'])
+
+    # 10) Evaluate log-likelihood
+    if sampler_dict['stride'] is not None:
+        model_cube = model_cube[:, ::sampler_dict['stride'], ::sampler_dict['stride']]
+        y = y[:, ::sampler_dict['stride'], ::sampler_dict['stride']]
+
+    sigma = sampler_dict['sigma']
+    logpdf = jsp.stats.norm.logpdf(y, model_cube, sigma)
+    return jnp.sum(logpdf)
+
+@jax.jit
+def logprob(params, y, freqs, sampler_dict):
+    """
+    jitted version for logprior + loglikelihood.
+    """
+    return logprior(params, sampler_dict) + loglikelihood(params, y, freqs, sampler_dict)
+
+
