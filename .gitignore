@@ -1,0 +1,7 @@
+*.pyc
+*.h5
+*.png
+*.yaml
+*-checkpoint.ipynb
+*.npy
+*.nc
