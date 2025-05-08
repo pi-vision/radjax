@@ -1,6 +1,7 @@
 # benchmark.py
 
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import time
 import numpy as np
 import jax
@@ -13,6 +14,8 @@ from gofish import imagecube
 import sensor, parametric_disk_old as parametric_disk, grid, line_rte
 from consts import *
 
+print(f"Using GPU: {jax.devices()}")
+# --------------------
 def render_cube(ray_coords, pixel_area, disk, nd_co, temperature, velocity_az, bbox, freqs, nu0):
     ray_coords_sph = grid.cartesian_to_spherical(ray_coords)
     ray_coords_polar = grid.spherical_to_zr(ray_coords_sph)
