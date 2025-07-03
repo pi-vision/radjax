@@ -16,3 +16,5 @@ M_sun = 1.9884e33                 # g
 G = 6.67259e-8                    # cm3 gram-1 s-2
 m_co = molecular_weight_co * mp  
 m_h = molecular_weight_h * mp
+mu = 2.34                         # mean molecular weight of the gas
+m_mol = mu * m_h

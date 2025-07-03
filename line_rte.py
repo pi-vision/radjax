@@ -130,7 +130,7 @@ compute_spectral_cube_pmap = jax.pmap(
     in_axes=(0, None, None, None, None, None, None, None, None, None, None, None)
 )
 
-def alpha_total_co(v_turb, gas_t):
+def alpha_total_co(v_turb, gas_t, m_mol_deprecated=None):
     """
     Compute the total line broadening due to thermal and turbulence velocities
 
@@ -140,9 +140,12 @@ def alpha_total_co(v_turb, gas_t):
         turbulence broadening scaled by the speed of sound.
     gas_t: jnp.array
         Temperature field (K)
+    m_mol: float,
+        Molecular weight
     """
     alpha_therm_sq = 2*kk*gas_t / m_co
-    alpha_tot = jnp.sqrt(alpha_therm_sq * (1 + v_turb**2))
+    cs_sq = 2*kk*gas_t / m_mol  # local speed of sound
+    alpha_tot = jnp.sqrt(alpha_therm_sq + v_turb**2 * cs_sq)
     return alpha_tot
     
 def load_molecular_tables(path):
