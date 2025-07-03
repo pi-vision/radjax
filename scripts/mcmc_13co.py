@@ -1,5 +1,5 @@
 import os, sys
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '9'
 
 import numpy as np
 import jax
@@ -25,7 +25,11 @@ ABUNDANCE_FACTOR = 1/69 # 13CO
 STRIDE = 3
 noise_sigma = 0.00143
 
-
+print("#####################################")
+print(f"Running for isotope: {isotope_name} with abundance factor: {ABUNDANCE_FACTOR}")
+print(f"Noise sigma: {noise_sigma}")
+print(f"Number of walkers: {NUM_WALKERS}, Number of steps: {NUM_STEPS}, Stride: {STRIDE}, Warmup steps: {NUM_WARMUP_STEPS}")
+print("#####################################")
 ################################################################################
 # 6) Define the rendering functions in a functional style
 ################################################################################

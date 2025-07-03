@@ -1,5 +1,5 @@
 import os, sys
-os.environ['CUDA_VISIBLE_DEVICES'] = '4'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 import numpy as np
 import jax
@@ -17,19 +17,16 @@ from functools import partial
 import time
 
 NUM_WALKERS = 60
-NUM_WARMUP_STEPS = 80
-NUM_STEPS = 1200
+NUM_WARMUP_STEPS = 100
+NUM_STEPS = 3000
 
-isotope_name = 'C18O'
-ABUNDANCE_FACTOR = 1/557 # C18O
-STRIDE = 3
-noise_sigma = 0.00099
+isotope_name = 'CO'
+ABUNDANCE_FACTOR = 1 # CO
+STRIDE = 1
+noise_sigma = 0.0074
+# noise_sigma = 0.01
 
-print("#####################################")
-print(f"Running for isotope: {isotope_name} with abundance factor: {ABUNDANCE_FACTOR}")
-print(f"Noise sigma: {noise_sigma}")
-print(f"Number of walkers: {NUM_WALKERS}, Number of steps: {NUM_STEPS}, Stride: {STRIDE}, Warmup steps: {NUM_WARMUP_STEPS}")
-print("#####################################")
+
 ################################################################################
 # 6) Define the rendering functions in a functional style
 ################################################################################
@@ -139,40 +136,40 @@ nd_co = abundance_co * nd_h2
 ################################################################################
 bbox_disk = jnp.array([(au*z_min, au*z_max), (au*r_min, au*r_max)])
 
-
 ################################################################################
 # 7) Example usage: generating pinhole and orthographic projections
 ################################################################################
 # Pinhole Projection Setup
-fov_as = 10.0  # arcsecs
-# data_path = '~/code/radjax/data/alma/HD163296_CO_highres_cen.cm.fits'
-data_path = f'/scratch/ondemand28/len/data/radjax/MAPS/HD_163296_{isotope_name}_220GHz.0.2arcsec.image.fits'
-velocity_range = (2000, 10000) # m/s
-vlsr = 5770 # systematic velocity of target
+fov_as = 11.0  # arcsecs
+data_path = '/scratch/ondemand28/len/data/radjax/flaherty/HD163296_CO_highres_cen.cm.fits'
+# data_path = '/scratch/ondemand28/len/data/radjax/MAPS/HD_163296_CO_220GHz.0.2arcsec.image.fits'
+data_cube = imagecube(data_path,FOV=fov_as)
 
-print("Loaded data cube:", data_path.split('/')[-1])
 
-data_cube = imagecube(data_path, FOV=fov_as, velocity_range=velocity_range)
+num_freqs_resample = 60
+num_freqs = len(data_cube.freqax)
+idx = np.round(np.linspace(0, num_freqs - 1, num_freqs_resample)).astype(int)
 
-freqs = data_cube.velocity_to_restframe_frequency(vlsr=vlsr)
-velocities = data_cube.velax
-data = data_cube.data
-
-print(f'Data shape: {data.shape}')
-
+data = data_cube.data[idx]
+freqs = data_cube.freqax[idx]
+velocities = data_cube.velax[idx]
 x_sky, y_sky = np.meshgrid(data_cube.xaxis, data_cube.yaxis, indexing='xy')
 nu0 = data_cube.nu0  # e.g. 230.538 GHz
 npix = data_cube.nxpix
+x_sky, y_sky = np.meshgrid(data_cube.xaxis, data_cube.yaxis, indexing='xy')
 width_kms = (velocities[-1] - velocities[0]) / 1000.0
 delta_v_ms = velocities[1] - velocities[0]
+
 # if num_freqs_resample > 1:
 #     delta_v_ms = velocities[1] - velocities[0]
 # else: 
 #     delta_v_ms = np.inf
 print(f'velocity resolution: {delta_v_ms} m/s')
 
-# Shift frequencies so that center is ~nu0
-# freqs += nu0 - freqs.mean()
+print(f'Data shape: {data.shape}')
+
+# Shift frequencies so that center is ~nu0, only for Flaherty cube
+freqs += nu0 - freqs.mean()
 
 projection_pinhole = sensor.PinholeProjection(
     name=f'HD163296_{isotope_name}',
@@ -308,7 +305,7 @@ sampler_dict = inference.create_sampler(
     sigma=noise_sigma,
     disk_params=disk_params,
     posterior_params=posterior_params,
-    stride=3
+    stride=STRIDE
 )
 
 ndim = len(list(posterior_params.keys()))    
@@ -317,7 +314,7 @@ nsteps = NUM_STEPS # Example number of MCMC steps
 num_iter_restart = NUM_WARMUP_STEPS
 restart_cluster_size = 1e-2
 
-run_name = f"MAPS_{isotope_name}_{nsteps}_iter_stride{sampler_dict['stride']}_MCMC_sampler"
+run_name = f"Flaherty_sigma_1e-2_{isotope_name}_{nsteps}_iter_stride{sampler_dict['stride']}_MCMC_sampler"
 print(f"Run name: {run_name}")
 
 save_dir = f"../mcmc_output/runs/{run_name}"
@@ -379,16 +376,50 @@ print("Mean acceptance fraction:", np.mean(sampler.acceptance_fraction))
 
 
 #### Load the MCMC results
-sampler_load = emcee.backends.HDFBackend(save_path)
 
-################################################################################
-# 6) Update the disk_params with the MCMC result and re-render
-################################################################################
-samples = sampler_load.get_chain(flat=True)
+backend = emcee.backends.HDFBackend(save_path)
+samples = backend.get_chain(flat=True)
 
-flat_samples = sampler_load.get_chain(discard=nsteps//2, thin=1, flat=True)
+flat_samples = backend.get_chain(discard=backend.iteration//2, thin=1, flat=True)
 
 ndim = flat_samples.shape[-1]
+
+param_index_dict = inference.DISK_PARAM_INDEX
+# posterior_params = {
+#     param_index_dict['q']: {
+#         'bounds': [-0.5, 0.0],
+#         'p0_range': [-0.3, -0.1],
+#     },
+#     param_index_dict['log_r_c']: {
+#         'bounds': [1.75, 2.50],
+#         'p0_range': [2.00, 2.30],
+#     },
+# #     param_index_dict['v_turb']: {
+# #         'bounds': [0.0, 1.0],
+# #         'p0_range': [0.05, 0.15],
+# #     },
+#     param_index_dict['T_atm1']: {
+#         'bounds': [40.0, 150.0],
+#         'p0_range': [60.0, 110.0],
+#     },
+#     param_index_dict['T_mid1']: {
+#         'bounds': [5.0, 40.0],
+#         'p0_range': [10.0, 30.0],
+#     },
+#     param_index_dict['r_in']: {
+#         'bounds': [1.0, 20.0],
+#         'p0_range': [5.0, 15.0],
+#     },
+# #     param_index_dict['r_break']: {
+# #         'bounds': [15.0, 115.0],
+# #         'p0_range': [50.0, 80.0],
+# #     },
+#     param_index_dict['q_in']: {
+#         'bounds': [-1.0, 0.0],
+#         'p0_range': [-0.7, -0.3],
+#     }
+# }
+
 param_labels = [
     inference.REV_DISK_PARAM_INDEX[idx] for idx in sorted(posterior_params.keys())
 ]
@@ -396,60 +427,148 @@ param_labels = [
 chosen_values = np.median(flat_samples, axis=0)
 print("Chosen parameter values (from MCMC) with their Flaherty's values:")
 
-for label, value in zip(param_labels, chosen_values):
-    disk_params[label] = value
-    print(f"{label}: chosen value = {value:.4f}")
-    
-# Save chosen parameter values to log file
-with open(log_file, 'a') as f:
-    f.write("\nChosen parameter values (from MCMC):\n")
-    for label, value in zip(param_labels, chosen_values):
-        f.write(f"{label}: chosen value = {value:.4f}\n")
+disk_params_mcmc = parametric_disk.create_disk_params(
+    q=-0.27,
+    q_in=-0.57,
+    r_break=70,
+    log_r_c=2.3,
+    v_turb=0.06,
+    T_atm1=87.0,
+    gamma=1.0,
+    T_mid1=17.8,
+    M_star=2.3 * M_sun,
+    r_in=11.0,
+    M_gas=0.09 * M_sun,
+    co_abundance=ABUNDANCE_FACTOR*1e-4,
+    N_dissoc=0.79 * 1.59e21,
+    N_desorp=-np.inf,
+    freezeout=19.0,
+    r_scale=150.0,
+    z_q0=70.0,
+    delta=1,
+    transition=2,
+    m_mol=2.37 * m_h,
+)
 
-# Update the disk_params with the MCMC results
-disk_params['v_turb'] = chosen_values[param_index_dict['v_turb']]
-disk_params['T_mid1'] = chosen_values[param_index_dict['T_mid1']]
-disk_params['T_atm1'] = chosen_values[param_index_dict['T_atm1']]
-disk_params['q'] = chosen_values[param_index_dict['q']]
-disk_params['q_in'] = chosen_values[param_index_dict['q_in']]
-disk_params['r_break'] = chosen_values[param_index_dict['r_break']]
-disk_params['r_in'] = chosen_values[param_index_dict['r_in']]
-disk_params['log_r_c'] = chosen_values[param_index_dict['log_r_c']]
+for label, value in zip(param_labels, chosen_values):
+    disk_params_mcmc[label] = value
+    print(f"Diskparam MCMC for {label} updated to: {disk_params_mcmc[label]}")
+    
+ground_truth = {
+    "q": -0.27,
+    "log_r_c": 2.3,
+    "v_turb": 0.06,
+    "T_atm1": 87.0,
+    "T_mid1": 17.8,
+    "r_in": 11.0,
+    "r_break": 70.0,
+    "q_in": -0.57
+}
+
+chain = backend.get_chain()
+
+fig, axes = plt.subplots(1, ndim, figsize=(14,3))
+for i in range(ndim):
+    axes[i].plot(chain[...,i])
+    axes[i].set_title(param_labels[i])
+
+plt.tight_layout()
+fig.savefig(f"{save_dir}/walkers_plot.png", dpi=300)
+
+import corner
+
+print("Flat samples shape:", flat_samples.shape)  # should be ((nsteps-100)*nwalkers, ndim)
+
+
+truth_values = [ground_truth[label] for label in param_labels]
+
+# corner plot
+fig = corner.corner(
+    flat_samples,
+    labels=param_labels,
+    quantiles=[0.16, 0.5, 0.84],
+    show_titles=True,
+    truths=truth_values,        # <--- overlay true values
+    truth_color="red",          # optional color
+    title_kwargs={"fontsize": 12}
+)
+fig.savefig(f"{save_dir}/corner_plot.png", dpi=300)
 
 # Recompute temperature and densities with updated v_turb
-temperature_mcmc = parametric_disk.temperature_profile(z_disk, r_disk, disk_params)
+temperature_mcmc = parametric_disk.temperature_profile(z_disk, r_disk, disk_params_mcmc)
 nd_h2_mcmc = parametric_disk.number_density_profile(
     z_disk,
     r_disk,
     temperature_mcmc,
-    disk_params["gamma"],
-    disk_params["r_in"],
-    10 ** disk_params["log_r_c"],
-    disk_params["M_gas"],
-    disk_params["M_star"],
-    disk_params["m_mol"]
+    disk_params_mcmc["gamma"],
+    disk_params_mcmc["r_in"],
+    10 ** disk_params_mcmc["log_r_c"],
+    disk_params_mcmc["M_gas"],
+    disk_params_mcmc["M_star"],
+    disk_params_mcmc["m_mol"]
+)
+
+r_min_mcmc, r_max_mcmc = disk_params_mcmc['r_in'], 800
+z_disk_mcmc, r_disk_mcmc = jnp.meshgrid(
+    jnp.linspace(z_min, z_max, resolution), 
+    jnp.linspace(r_min_mcmc, r_max_mcmc, resolution), 
+    indexing='ij'
 )
 
 velocity_az_mcmc = -parametric_disk.velocity_profile(
-    z_disk, r_disk, nd_h2_mcmc, temperature_mcmc, disk_params
+    z_disk, r_disk_mcmc, nd_h2_mcmc, temperature_mcmc, disk_params_mcmc
 )
 
 N_h2_mcmc = parametric_disk.surface_density(z_disk, nd_h2_mcmc)
-abundance_co_mcmc = parametric_disk.co_abundance_profile(N_h2_mcmc, temperature_mcmc, disk_params)
+abundance_co_mcmc = parametric_disk.co_abundance_profile(N_h2_mcmc, temperature_mcmc, disk_params_mcmc)
 nd_co_mcmc = abundance_co_mcmc * nd_h2_mcmc
 
-# Render new cube with the updated v_turb
+bbox_disk_mcmc = jnp.array([(au*z_min, au*z_max), (au*r_min_mcmc, au*r_max_mcmc)])
+
+projection_pinhole_mcmc = sensor.PinholeProjection(
+    name=f'HD163296_{isotope_name}_MCMC',
+    x_sky=x_sky,
+    y_sky=y_sky,
+    distance=122.0,
+    nray=100,
+    incl=47.5,
+    phi=0.0,
+    posang=312.0,
+    z_width=2 * z_max,
+    freqs=freqs
+)
+
+fov_rad = fov_as * arcsec
+fov = 2 * projection_pinhole_mcmc.distance * pc * np.tan(fov_rad / 2.0)
+pixel_area_pinhole_mcmc = (fov / npix) ** 2
+
+ray_coords_pinhole_mcmc, obs_dir_pinhole_mcmc = sensor.pinhole_disk_projection(
+    projection_pinhole_mcmc.x_sky,
+    projection_pinhole_mcmc.y_sky,
+    projection_pinhole_mcmc.distance,
+    projection_pinhole_mcmc.nray,
+    projection_pinhole_mcmc.incl,
+    projection_pinhole_mcmc.phi,
+    projection_pinhole_mcmc.posang,
+    projection_pinhole_mcmc.z_width
+)
+
+beam = data_cube.beams_per_pix * sensor.beam(
+    data_cube.dpix, data_cube.bmaj, data_cube.bmin, data_cube.bpa
+)
+
+# # Render new cube with the updated v_turb
 images_mcmc = render_cube_pinhole(
-    ray_coords=ray_coords_pinhole,
-    pixel_area=pixel_area_pinhole,
-    disk_params=disk_params,       # pass the dictionary instead of a disk object
+    ray_coords=ray_coords_pinhole_mcmc,
+    pixel_area=pixel_area_pinhole_mcmc,
+    disk_params=disk_params_mcmc,       # pass the dictionary instead of a disk object
     nd_co=nd_co_mcmc,
     temperature=temperature_mcmc,
     velocity_az=velocity_az_mcmc,
-    bbox=bbox_disk,
+    bbox=bbox_disk_mcmc,
     freqs=freqs,
     nu0=nu0,
-    obs_dir=obs_dir_pinhole,
+    obs_dir=obs_dir_pinhole_mcmc,
     molecular_table=molecular_table
 )
 
@@ -467,40 +586,40 @@ print(f"MCMC Chi-squared: {chi2_mcmc:.2f}, Chi-squared/N_data = {chi_squared_ove
 print(f"MCMC Residual Sum: {residual_sum_mcmc:.5f}")
 print(f"MCMC Residual Mean: {residual_mean_mcmc:.5f}")
 
-chain = sampler_load.get_chain()
+# chain = sampler_load.get_chain()
 
-ndim = chain.shape[-1]
-param_labels = [
-    inference.REV_DISK_PARAM_INDEX[idx] for idx in sorted(posterior_params.keys())
-]
+# ndim = chain.shape[-1]
+# param_labels = [
+#     inference.REV_DISK_PARAM_INDEX[idx] for idx in sorted(posterior_params.keys())
+# ]
 
-fig, axes = plt.subplots(1, ndim, figsize=(14,3))
-for i in range(ndim):
-    axes[i].plot(chain[...,i])
-    axes[i].set_title(param_labels[i])
+# fig, axes = plt.subplots(1, ndim, figsize=(14,3))
+# for i in range(ndim):
+#     axes[i].plot(chain[...,i])
+#     axes[i].set_title(param_labels[i])
 
-plt.tight_layout()
+# plt.tight_layout()
 
-# Save walkers plot
-fig.savefig(f"{save_dir}/walkers_plot.png", dpi=300)
+# # Save walkers plot
+# fig.savefig(f"{save_dir}/walkers_plot.png", dpi=300)
 
-import corner
+# import corner
 
-# Discard first 100 steps, flatten the rest
-flat_samples = sampler_load.get_chain(discard=nsteps//2, thin=1, flat=True)
-print("Flat samples shape:", flat_samples.shape)  # should be ((nsteps-100)*nwalkers, ndim)
+# # Discard first 100 steps, flatten the rest
+# flat_samples = sampler_load.get_chain(discard=nsteps//2, thin=1, flat=True)
+# print("Flat samples shape:", flat_samples.shape)  # should be ((nsteps-100)*nwalkers, ndim)
 
-param_labels = [
-    inference.REV_DISK_PARAM_INDEX[idx] for idx in sorted(posterior_params.keys())
-]
+# param_labels = [
+#     inference.REV_DISK_PARAM_INDEX[idx] for idx in sorted(posterior_params.keys())
+# ]
 
-# corner plot
-fig = corner.corner(
-    flat_samples,
-    labels=param_labels,
-    quantiles=[0.16, 0.5, 0.84],
-    show_titles=True
-)
+# # corner plot
+# fig = corner.corner(
+#     flat_samples,
+#     labels=param_labels,
+#     quantiles=[0.16, 0.5, 0.84],
+#     show_titles=True
+# )
 
-# Save corner plot
-fig.savefig(f"{save_dir}/corner_plot.png", dpi=300)
+# # Save corner plot
+# fig.savefig(f"{save_dir}/corner_plot.png", dpi=300)

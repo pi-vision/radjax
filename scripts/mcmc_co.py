@@ -1,5 +1,5 @@
 import os, sys
-os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 import numpy as np
 import jax
@@ -17,13 +17,13 @@ from functools import partial
 import time
 
 NUM_WALKERS = 60
-NUM_WARMUP_STEPS = 80
-NUM_STEPS = 1200
+NUM_WARMUP_STEPS = 100
+NUM_STEPS = 2400
 
 isotope_name = 'CO'
 ABUNDANCE_FACTOR = 1 # CO
-STRIDE = 3
-noise_sigma = 0.007
+STRIDE = 5
+noise_sigma = 0.002
 
 
 ################################################################################
@@ -312,7 +312,7 @@ nsteps = NUM_STEPS # Example number of MCMC steps
 num_iter_restart = NUM_WARMUP_STEPS
 restart_cluster_size = 1e-2
 
-run_name = f"MAPS_{isotope_name}_{nsteps}_iter_stride{sampler_dict['stride']}_MCMC_sampler"
+run_name = f"MAPS_sigma_2e-3_{isotope_name}_{nsteps}_iter_stride{sampler_dict['stride']}_MCMC_sampler"
 print(f"Run name: {run_name}")
 
 save_dir = f"../mcmc_output/runs/{run_name}"
@@ -383,40 +383,40 @@ flat_samples = backend.get_chain(discard=backend.iteration//2, thin=1, flat=True
 ndim = flat_samples.shape[-1]
 
 param_index_dict = inference.DISK_PARAM_INDEX
-posterior_params = {
-    param_index_dict['q']: {
-        'bounds': [-0.5, 0.0],
-        'p0_range': [-0.3, -0.1],
-    },
-    param_index_dict['log_r_c']: {
-        'bounds': [1.75, 2.50],
-        'p0_range': [2.00, 2.30],
-    },
-    param_index_dict['v_turb']: {
-        'bounds': [0.0, 1.0],
-        'p0_range': [0.05, 0.15],
-    },
-    param_index_dict['T_atm1']: {
-        'bounds': [40.0, 150.0],
-        'p0_range': [60.0, 110.0],
-    },
-    param_index_dict['T_mid1']: {
-        'bounds': [5.0, 40.0],
-        'p0_range': [10.0, 30.0],
-    },
-    param_index_dict['r_in']: {
-        'bounds': [1.0, 20.0],
-        'p0_range': [5.0, 15.0],
-    },
-    param_index_dict['r_break']: {
-        'bounds': [15.0, 115.0],
-        'p0_range': [50.0, 80.0],
-    },
-    param_index_dict['q_in']: {
-        'bounds': [-1.0, 0.0],
-        'p0_range': [-0.7, -0.3],
-    }
-}
+# posterior_params = {
+#     param_index_dict['q']: {
+#         'bounds': [-0.5, 0.0],
+#         'p0_range': [-0.3, -0.1],
+#     },
+#     param_index_dict['log_r_c']: {
+#         'bounds': [1.75, 2.50],
+#         'p0_range': [2.00, 2.30],
+#     },
+# #     param_index_dict['v_turb']: {
+# #         'bounds': [0.0, 1.0],
+# #         'p0_range': [0.05, 0.15],
+# #     },
+#     param_index_dict['T_atm1']: {
+#         'bounds': [40.0, 150.0],
+#         'p0_range': [60.0, 110.0],
+#     },
+#     param_index_dict['T_mid1']: {
+#         'bounds': [5.0, 40.0],
+#         'p0_range': [10.0, 30.0],
+#     },
+#     param_index_dict['r_in']: {
+#         'bounds': [1.0, 20.0],
+#         'p0_range': [5.0, 15.0],
+#     },
+# #     param_index_dict['r_break']: {
+# #         'bounds': [15.0, 115.0],
+# #         'p0_range': [50.0, 80.0],
+# #     },
+#     param_index_dict['q_in']: {
+#         'bounds': [-1.0, 0.0],
+#         'p0_range': [-0.7, -0.3],
+#     }
+# }
 
 param_labels = [
     inference.REV_DISK_PARAM_INDEX[idx] for idx in sorted(posterior_params.keys())
