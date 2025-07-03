@@ -5,3 +5,5 @@
 *-checkpoint.ipynb
 *.npy
 *.nc
+figures/*
+mcmc_output/*
