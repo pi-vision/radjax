@@ -12,7 +12,7 @@ from consts import *  # Replace with actual imports as needed
 def create_disk_params(
     T_mid1, T_atm1, q, q_in, r_break, M_star, gamma, r_in, log_r_c, M_gas,
     v_turb, co_abundance, N_dissoc, N_desorp, z_q0, transition, m_mol,
-    freezeout, delta, r_scale
+    freezeout, delta, r_scale, v_sys = 0
 ):
     """
     Returns a dict containing the disk parameters formerly used in DiskFlaherty.
@@ -37,7 +37,8 @@ def create_disk_params(
         'm_mol': m_mol,
         'freezeout': freezeout,
         'delta': delta,
-        'r_scale': r_scale
+        'r_scale': r_scale,
+        'v_sys': v_sys
     }
 
 def temperature_profile(z, r, params):
@@ -78,11 +79,17 @@ def co_abundance_profile(N_h2, temperature, params):
     abundance = jnp.where(co_region, params['co_abundance'], 0.0)
     return abundance
 
-def velocity_profile(z, r, nd, temperature, params):
+def velocity_profile(z, r, nd, temperature, params, pressure_correction=False):
     """
     Computes the (azimuthal) Keplerian velocity, ignoring pressure corrections.
     """
-    return jnp.sqrt(vsq_keplerian_vertical(z, r, params['M_star']))
+    if pressure_correction:
+        v = jnp.sqrt(vsq_keplerian_vertical(z, r, params['M_star']) + vsq_pressure_grad(r, nd, temperature, params['m_mol']))
+        # If there is a large negative pressure gradient this sqrt might produce nans
+        v = jnp.nan_to_num(v)
+    else:
+        v = jnp.sqrt(vsq_keplerian_vertical(z, r, params['M_star']))
+    return v
 
 ###############################################################################
 # Utility functions for the disk model (mostly 

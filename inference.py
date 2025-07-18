@@ -12,6 +12,7 @@ import parametric_disk
 from consts import *
 from network import shard
 from functools import partial
+import matplotlib.pyplot as plt
 
 import visibilities_utils as vis_utils
 
@@ -52,7 +53,8 @@ DISK_PARAM_INDEX = {
     'm_mol': 16,
     'freezeout': 17,
     'delta': 18,
-    'r_scale': 19
+    'r_scale': 19,
+    'v_sys': 20,
 }
 
 # Reverse key-value pair for DISK_PARAM_INDEX
@@ -61,7 +63,7 @@ REV_DISK_PARAM_INDEX = {index: name for name, index in DISK_PARAM_INDEX.items()}
 
 def create_sampler(
     z_disk, r_disk, bbox, pixel_area, ray_coords, ray_coords_polar, obs_dir,
-    beam, energy_levels, radiative_transitions, sigma, disk_params, posterior_params, nu0 = None, stride=None    
+    beam, energy_levels, radiative_transitions, sigma, disk_params, posterior_params, nu0 = None, stride=None, velocity_az_multiplier=-1    
 ):
     """
     Return a dict containing all the static data needed for the MCMC sampling.
@@ -94,7 +96,9 @@ def create_sampler(
         'nu0': nu0,
         'a_ud': a_ud,
         'b_ud': b_ud,
-        'b_du': b_du
+        'b_du': b_du,
+        'velocity_az_multiplier': velocity_az_multiplier,
+        'velocity_pressure_correction': False,
     }
     return sampler_dict
 
@@ -145,7 +149,9 @@ def loglikelihood(params, y, freqs, stride, sampler_dict):
         name = REV_DISK_PARAM_INDEX[param_index]
 #         print(f'updated {disk_params[name]} to {params[col]}')
         disk_params[name] = params[col]
-        
+    
+    delta_freq = -sampler_dict['nu0'] * disk_params['v_sys'] * 1e5 / cc
+    adjusted_freqs = freqs + delta_freq
 
     # 1) Build temperature field
     temperature = parametric_disk.temperature_profile(
@@ -166,10 +172,22 @@ def loglikelihood(params, y, freqs, stride, sampler_dict):
     )
 
     # 3) Build velocities
-    velocity_az = -parametric_disk.velocity_profile(
+    # sampler_dict['velocity_az_multiplier'] = -1 for clockwise, +1 for counter-clockwise
+    velocity_nopressure = parametric_disk.velocity_profile(
         sampler_dict['z_disk'], sampler_dict['r_disk'],
-        nd_h2, temperature, disk_params
+        nd_h2, temperature, disk_params, pressure_correction=False
     )
+
+    velocity_withpressure = parametric_disk.velocity_profile(
+        sampler_dict['z_disk'], sampler_dict['r_disk'],
+        nd_h2, temperature, disk_params, pressure_correction=True
+    )
+
+    use_pressure = jnp.asarray(sampler_dict['velocity_pressure_correction'])
+
+    # `jnp.where` requires arrays of same shape: use `where(..., a, b)` elementwise
+    velocity_az_raw = jnp.where(use_pressure, velocity_withpressure, velocity_nopressure)
+    velocity_az = sampler_dict['velocity_az_multiplier'] * velocity_az_raw
 
     # 4) Compute column integrated density N_h2
     N_h2 = parametric_disk.surface_density(sampler_dict['z_disk'], nd_h2)
@@ -202,15 +220,25 @@ def loglikelihood(params, y, freqs, stride, sampler_dict):
 
     # 8) Compute the model data cube
     model_cube = line_rte.compute_spectral_cube_pmap(
-        shard(freqs), gas_v, alpha_tot, n_up, n_dn,
+        shard(adjusted_freqs), gas_v, alpha_tot, n_up, n_dn,
         sampler_dict['a_ud'], sampler_dict['b_ud'], sampler_dict['b_du'],
         sampler_dict['ray_coords'], sampler_dict['obs_dir'],
         sampler_dict['nu0'], sampler_dict['pixel_area']
     )
 
     # 9) Convolve model with the beam
-    model_cube = jnp.nan_to_num(model_cube).reshape(freqs.size, *sampler_dict['ray_coords'].shape[:2])
+    model_cube = jnp.nan_to_num(model_cube).reshape(adjusted_freqs.size, *sampler_dict['ray_coords'].shape[:2])
     model_cube = sensor.fftconvolve_vmap(model_cube, sampler_dict['beam'])
+    
+#     plt.imshow(model_cube[0], origin='lower', cmap='inferno')
+#     plt.colorbar()
+#     plt.title(f"Rendered model (channel=0)")
+#     plt.savefig("/nfs/rhea.dgp/u8/d/len/code/radjax_updated/mcmc_output/debug_model.png", dpi=300)
+#     plt.close()
+    
+#     if jnp.any(jnp.isnan(model_cube)):
+#         print("NaN in model_cube")
+#         print("unique:", jnp.unique(model_cube))
 
     # 10) Evaluate log-likelihood
     if stride is not None:
@@ -219,6 +247,15 @@ def loglikelihood(params, y, freqs, stride, sampler_dict):
 
     sigma = sampler_dict['sigma']
     logpdf = jsp.stats.norm.logpdf(y, model_cube, sigma)
+    
+#     if jnp.any(jnp.isnan(logpdf)):
+#         print("NaN in logpdf")
+#         print("Params:", params)
+#         print("Disk params used:")
+#         for col, param_index in enumerate(sorted(sampler_dict['posterior_params'].keys())):
+#             name = REV_DISK_PARAM_INDEX[param_index]
+#             print(f"  {name}: {params[col]}")
+    
     return jnp.sum(logpdf)
 
 def loglikelihood_uv(params, y, y_weights, y_density_weights, y_npix, y_nonzero_indices, freqs, sampler_dict):
@@ -235,6 +272,12 @@ def loglikelihood_uv(params, y, y_weights, y_density_weights, y_npix, y_nonzero_
         name = REV_DISK_PARAM_INDEX[param_index]
 #         print(f'updated {disk_params[name]} to {params[col]}')
         disk_params[name] = params[col]
+    
+    if disk_params['v_sys'] != 0:
+        delta_freq = -sampler_dict['nu0'] * disk_params['v_sys'] * 1e5 / cc 
+        adjusted_freqs = freqs + delta_freq
+    else:
+        adjusted_freqs = freqs
         
     # 1) Build temperature field
     temperature = parametric_disk.temperature_profile(
@@ -255,9 +298,9 @@ def loglikelihood_uv(params, y, y_weights, y_density_weights, y_npix, y_nonzero_
     )
 
     # 3) Build velocities
-    velocity_az = -parametric_disk.velocity_profile(
+    velocity_az = sampler_dict['velocity_az_multiplier'] * parametric_disk.velocity_profile(
         sampler_dict['z_disk'], sampler_dict['r_disk'],
-        nd_h2, temperature, disk_params
+        nd_h2, temperature, disk_params, sampler_dict['velocity_pressure_correction']
     )
 
     # 4) Compute column integrated density N_h2
@@ -291,13 +334,13 @@ def loglikelihood_uv(params, y, y_weights, y_density_weights, y_npix, y_nonzero_
 
     # 8) Compute the model data cube
     model_cube = line_rte.compute_spectral_cube_pmap(
-        shard(freqs), gas_v, alpha_tot, n_up, n_dn,
+        shard(adjusted_freqs), gas_v, alpha_tot, n_up, n_dn,
         sampler_dict['a_ud'], sampler_dict['b_ud'], sampler_dict['b_du'],
         sampler_dict['ray_coords'], sampler_dict['obs_dir'],
         sampler_dict['nu0'], sampler_dict['pixel_area']
     )
     
-    model_cube = jnp.nan_to_num(model_cube).reshape(freqs.size, *sampler_dict['ray_coords'].shape[:2])
+    model_cube = jnp.nan_to_num(model_cube).reshape(adjusted_freqs.size, *sampler_dict['ray_coords'].shape[:2])
     model_cube_padded = pad_image_cube(model_cube, y_npix)
     
     # 9) Compute the gridded visibilities
