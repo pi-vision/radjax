@@ -13,8 +13,9 @@ For advanced usage, explore submodules:
     radjax.inference
     radjax.viz
 """
-
-# --- Core solvers & utilities ---
+# --- Core / physics ---
+from .core import line_rte
+from .core import io
 
 # --- Models ---
 
@@ -24,19 +25,4 @@ For advanced usage, explore submodules:
 
 # --- Package metadata ---
 __version__ = "0.1.0"
-__all__ = [
-    # Core
-    "solve_rte",
-    "Grid",
-    "Sensor",
-    "compute_visibilities",
-    "PHYSICAL_CONSTANTS",
-    # Models
-    "ParametricDisk",
-    # Inference
-    "run_inference",
-    "InferenceConfig",
-    # Viz
-    "plot_spectrum",
-    "plot_image",
-]
+__all__ = ["line_rte", "io", "grid"]
