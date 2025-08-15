@@ -78,12 +78,18 @@ def co_abundance_profile(N_h2, temperature, params):
     abundance = jnp.where(co_region, params['co_abundance'], 0.0)
     return abundance
 
-def velocity_profile(z, r, nd, temperature, params):
+def velocity_profile(z, r, nd, temperature, params, pressure_correction=False):
     """
     Computes the (azimuthal) Keplerian velocity, ignoring pressure corrections.
     """
-    return jnp.sqrt(vsq_keplerian_vertical(z, r, params['M_star']))
-
+    vsq = vsq_keplerian_vertical(z, r, params['M_star'])
+    if pressure_correction:
+        vsq += vsq_pressure_grad(r, nd, temperature, params['m_mol'])
+        
+    # If there is a large negative pressure gradient this sqrt might produce nans
+    v = jnp.nan_to_num(jnp.sqrt(vsq))
+    return v
+    
 ###############################################################################
 # Utility functions for the disk model (mostly 
 ###############################################################################
