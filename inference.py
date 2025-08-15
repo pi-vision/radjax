@@ -55,6 +55,7 @@ DISK_PARAM_INDEX = {
     'delta': 18,
     'r_scale': 19,
     'v_sys': 20,
+    'delta_v_sys': 21,
 }
 
 # Reverse key-value pair for DISK_PARAM_INDEX
@@ -63,7 +64,7 @@ REV_DISK_PARAM_INDEX = {index: name for name, index in DISK_PARAM_INDEX.items()}
 
 def create_sampler(
     z_disk, r_disk, bbox, pixel_area, ray_coords, ray_coords_polar, obs_dir,
-    beam, energy_levels, radiative_transitions, sigma, disk_params, posterior_params, nu0 = None, stride=None, velocity_az_multiplier=-1    
+    beam, energy_levels, radiative_transitions, sigma, disk_params, posterior_params, nu0, stride=None, velocity_az_multiplier=-1
 ):
     """
     Return a dict containing all the static data needed for the MCMC sampling.
@@ -71,12 +72,9 @@ def create_sampler(
     param_names = list(posterior_params.keys())
 
     # Pre-compute line RTE constants
-    nu0_default, a_ud, b_ud, b_du = line_rte.einstein_coefficients(
+    _, a_ud, b_ud, b_du = line_rte.einstein_coefficients(
         energy_levels, radiative_transitions, transition=disk_params['transition']
     )
-    
-    if nu0 is None:
-        nu0 = nu0_default
 
     sampler_dict = {
         'z_disk': z_disk,
@@ -98,7 +96,6 @@ def create_sampler(
         'b_ud': b_ud,
         'b_du': b_du,
         'velocity_az_multiplier': velocity_az_multiplier,
-        'velocity_pressure_correction': False,
     }
     return sampler_dict
 
@@ -150,8 +147,8 @@ def loglikelihood(params, y, freqs, stride, sampler_dict):
 #         print(f'updated {disk_params[name]} to {params[col]}')
         disk_params[name] = params[col]
     
-    delta_freq = -sampler_dict['nu0'] * disk_params['v_sys'] * 1e5 / cc
-    adjusted_freqs = freqs + delta_freq
+    delta_v_sys = disk_params['delta_v_sys']  # in m/s
+    adjusted_freqs = freqs - (sampler_dict['nu0'] * delta_v_sys / cc)
 
     # 1) Build temperature field
     temperature = parametric_disk.temperature_profile(
@@ -172,23 +169,18 @@ def loglikelihood(params, y, freqs, stride, sampler_dict):
     )
 
     # 3) Build velocities
-    # sampler_dict['velocity_az_multiplier'] = -1 for clockwise, +1 for counter-clockwise
-    velocity_nopressure = parametric_disk.velocity_profile(
-        sampler_dict['z_disk'], sampler_dict['r_disk'],
-        nd_h2, temperature, disk_params, pressure_correction=False
-    )
-
-    velocity_withpressure = parametric_disk.velocity_profile(
+    # No pressure gradient calculation
+#     velocity_az = parametric_disk.velocity_profile(
+#         sampler_dict['z_disk'], sampler_dict['r_disk'],
+#         nd_h2, temperature, disk_params, pressure_correction=False
+#     )
+    
+    # With pressure gradient
+    velocity_az = sampler_dict['velocity_az_multiplier'] * parametric_disk.velocity_profile(
         sampler_dict['z_disk'], sampler_dict['r_disk'],
         nd_h2, temperature, disk_params, pressure_correction=True
     )
-
-    use_pressure = jnp.asarray(sampler_dict['velocity_pressure_correction'])
-
-    # `jnp.where` requires arrays of same shape: use `where(..., a, b)` elementwise
-    velocity_az_raw = jnp.where(use_pressure, velocity_withpressure, velocity_nopressure)
-    velocity_az = sampler_dict['velocity_az_multiplier'] * velocity_az_raw
-
+    
     # 4) Compute column integrated density N_h2
     N_h2 = parametric_disk.surface_density(sampler_dict['z_disk'], nd_h2)
 
@@ -273,11 +265,8 @@ def loglikelihood_uv(params, y, y_weights, y_density_weights, y_npix, y_nonzero_
 #         print(f'updated {disk_params[name]} to {params[col]}')
         disk_params[name] = params[col]
     
-    if disk_params['v_sys'] != 0:
-        delta_freq = -sampler_dict['nu0'] * disk_params['v_sys'] * 1e5 / cc 
-        adjusted_freqs = freqs + delta_freq
-    else:
-        adjusted_freqs = freqs
+    delta_freq = -sampler_dict['nu0'] * disk_params['v_sys'] * 1e5 / cc
+    adjusted_freqs = freqs + delta_freq
         
     # 1) Build temperature field
     temperature = parametric_disk.temperature_profile(
@@ -339,7 +328,7 @@ def loglikelihood_uv(params, y, y_weights, y_density_weights, y_npix, y_nonzero_
         sampler_dict['ray_coords'], sampler_dict['obs_dir'],
         sampler_dict['nu0'], sampler_dict['pixel_area']
     )
-    
+        
     model_cube = jnp.nan_to_num(model_cube).reshape(adjusted_freqs.size, *sampler_dict['ray_coords'].shape[:2])
     model_cube_padded = pad_image_cube(model_cube, y_npix)
     
