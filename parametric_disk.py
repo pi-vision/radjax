@@ -12,7 +12,7 @@ from consts import *  # Replace with actual imports as needed
 def create_disk_params(
     T_mid1, T_atm1, q, q_in, r_break, M_star, gamma, r_in, log_r_c, M_gas,
     v_turb, co_abundance, N_dissoc, N_desorp, z_q0, transition, m_mol,
-    freezeout, delta, r_scale, v_sys = 0
+    freezeout, delta, r_scale, v_sys = 0, delta_v_sys = 0
 ):
     """
     Returns a dict containing the disk parameters formerly used in DiskFlaherty.
@@ -38,7 +38,8 @@ def create_disk_params(
         'freezeout': freezeout,
         'delta': delta,
         'r_scale': r_scale,
-        'v_sys': v_sys
+        'v_sys': v_sys,
+        'delta_v_sys': delta_v_sys,
     }
 
 def temperature_profile(z, r, params):
