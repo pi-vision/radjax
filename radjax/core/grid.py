@@ -17,7 +17,7 @@ import jax.numpy as jnp
 import numpy as np
 import jax.scipy as jscp
 from scipy.spatial.transform import Rotation as R
-
+import scipy
 
 # -----------------------------------------------------------------------------
 # Coordinate transforms
@@ -123,15 +123,20 @@ def _normalize(v: jnp.ndarray, eps: float = 1e-30) -> jnp.ndarray:
 
 def _rodrigues(axis: jnp.ndarray, angle_rad: jnp.ndarray) -> jnp.ndarray:
     """
-    Rodrigues' rotation formula: R = I + sinθ [k]_x + (1-cosθ) [k]_x^2.
-
-    Supports broadcasting over the leading dimensions of `axis` and `angle_rad`.
+    Rodrigues' rotation formula: R = I + sinθ [k]_x + (1-cosθ) [k]_x^2,
+    with k = axis / ||axis||. Supports broadcasting.
     """
-    k = _normalize(axis)
-    K = _skew(k)
-    sin_t = jnp.sin(angle_rad)[..., None, None]
-    cos_t = jnp.cos(angle_rad)[..., None, None]
-    I = jnp.eye(3, dtype=axis.dtype)
+    axis = jnp.asarray(axis)
+    angle_rad = jnp.asarray(angle_rad)
+    dtype = jnp.result_type(axis, angle_rad)
+    axis = axis.astype(dtype)
+    angle_rad = angle_rad.astype(dtype)
+
+    k = _normalize(axis)                         # (...,3)
+    K = _skew(k)                                 # (...,3,3)
+    sin_t = jnp.sin(angle_rad)[..., None, None]  # (...,1,1)
+    cos_t = jnp.cos(angle_rad)[..., None, None]  # (...,1,1)
+    I = jnp.eye(3, dtype=dtype)                  # (3,3)
     return I + sin_t * K + (1.0 - cos_t) * (K @ K)
 
 
@@ -171,71 +176,100 @@ def _roxz(theta: jnp.ndarray, phi: jnp.ndarray) -> jnp.ndarray:
 
 def rotate_coords(coords: jnp.ndarray, incl: float, phi: float, posang: float) -> jnp.ndarray:
     """
-    Apply ZXZ Euler rotation (degrees): (posang, incl, -phi).
+    Rotate Cartesian points using **extrinsic** ZXZ Euler angles, matching:
+        scipy.spatial.transform.Rotation.from_euler('zxz', [posang, incl, -phi], degrees=True)
 
     Parameters
     ----------
-    coords : (..., 3) jnp.ndarray
-        Cartesian coordinates to rotate.
+    coords : (..., 3) array_like
+        Points to rotate. Any leading shape is preserved; last axis must be 3.
     incl, phi, posang : float
-        Angles in degrees.
+        Angles in **degrees**. Can be Python floats or 0-D/1-D JAX arrays
+        broadcastable to the same shape (advanced use).
 
     Returns
     -------
     coords_rot : (..., 3) jnp.ndarray
-        Rotated coordinates.
-    """
-    # ZXZ intrinsic like SciPy: Rz(posang) @ Rx(incl) @ Rz(-phi)
-    Rmat = _rotzxz(
-        jnp.deg2rad(jnp.asarray(posang)),
-        jnp.deg2rad(jnp.asarray(incl)),
-        jnp.deg2rad(-jnp.asarray(phi)),
-    )  # (3,3)
-    coords = jnp.asarray(coords)
-    # (...,3) @ (3,3)^T → (...,3)
-    return coords @ Rmat.T
+        Rotated points with the same leading shape as `coords`.
 
+    Notes
+    ---------
+    - Extrinsic (static axes) rotations: Z(posang) after X(incl) after Z(-phi).
+    - Equivalent rotation matrix: R = Rz(-phi) @ Rx(incl) @ Rz(posang).
+    - Row-vector convention: output = coords @ R.T.
+    """
+    coords = jnp.asarray(coords)
+    dtype = coords.dtype
+    Rz_posang = _rotz(jnp.deg2rad(jnp.asarray(posang, dtype=dtype)))
+    Rx_incl   = _rotx(jnp.deg2rad(jnp.asarray(incl,   dtype=dtype)))
+    Rz_negphi = _rotz(jnp.deg2rad(jnp.asarray(-phi,   dtype=dtype)))
+    # Extrinsic Z(posang) after X(incl) after Z(-phi)  -> left-multiply in that order:
+    Rmat = Rz_negphi @ Rx_incl @ Rz_posang
+    return coords @ Rmat.T
 
 def rotate_coords_angles(coords: jnp.ndarray, incl: float, phi: float) -> jnp.ndarray:
     """
-    Apply XZ Euler rotation (degrees): (incl, phi).
+    Rotate Cartesian points using **extrinsic** XZ Euler angles, matching:
+        scipy.spatial.transform.Rotation.from_euler('xz', [incl, phi], degrees=True)
 
     Parameters
     ----------
-    coords : (..., 3) jnp.ndarray
+    coords : (..., 3) array_like
+        Points to rotate. Any leading shape is preserved; last axis must be 3.
     incl, phi : float
-        Angles in degrees.
+        Angles in **degrees**. Can be Python floats or broadcastable JAX arrays.
 
     Returns
     -------
     coords_rot : (..., 3) jnp.ndarray
-    """
-    # XZ intrinsic like SciPy: Rx(incl) @ Rz(phi)
-    Rmat = _roxz(jnp.deg2rad(jnp.asarray(incl)), jnp.deg2rad(jnp.asarray(phi)))  # (3,3)
-    coords = jnp.asarray(coords)
-    return coords @ Rmat.T
+        Rotated points with the same leading shape as `coords`.
 
+    Notes
+    ---------
+    - Extrinsic (static axes) rotations: X(incl) then Z(phi).
+    - Equivalent rotation matrix: R = Rz(phi) @ Rx(incl).
+    - Row-vector convention: output = coords @ R.T.
+    """
+    coords = jnp.asarray(coords)
+    dtype = coords.dtype
+    Rz_phi = _rotz(jnp.deg2rad(jnp.asarray(phi,  dtype=dtype)))
+    Rx_inc = _rotx(jnp.deg2rad(jnp.asarray(incl, dtype=dtype)))
+    # Extrinsic X(incl) then Z(phi) -> left-multiply newest on the left:
+    Rmat = Rz_phi @ Rx_inc
+    return coords @ Rmat.T
 
 def rotate_coords_vector(coords: jnp.ndarray, vector: jnp.ndarray, angle: float) -> jnp.ndarray:
     """
-    Rotate points around an axis `vector` by `angle` degrees using Rodrigues' formula.
+    Axis–angle rotation via Rodrigues' formula, matching:
+        scipy.spatial.transform.Rotation.from_rotvec(angle * vector, degrees=True)
 
     Parameters
     ----------
-    coords : (..., 3) jnp.ndarray
-        Points to rotate.
-    vector : (3,) jnp.ndarray
-        Rotation axis (need not be unit length).
+    coords : (..., 3) array_like
+        Points to rotate. Any leading shape is preserved; last axis must be 3.
+    vector : (3,) array_like
+        Rotation axis (arbitrary scale). Only its direction matters.
     angle : float
-        Rotation angle in degrees.
+        Rotation angle in **degrees**.
 
     Returns
     -------
     coords_rot : (..., 3) jnp.ndarray
+        Rotated points with the same leading shape as `coords`.
+
+    Notes
+    ---------
+    - Axis is the **direction** of `vector` (need not be unit length).
+    - Effective rotation magnitude (radians) = deg2rad(angle) * ||vector||.
+    - If `vector == 0`, this reduces to the identity.
+    - Row-vector convention: output = coords @ R.T.
     """
-    # Axis-angle (Rodrigues) with unit axis; SciPy expects rotvec in radians
-    Rmat = _rodrigues(jnp.asarray(vector, dtype=jnp.result_type(coords)), jnp.deg2rad(jnp.asarray(angle)))
     coords = jnp.asarray(coords)
+    v = jnp.asarray(vector, dtype=coords.dtype)      # (3,)
+    # Effective angle (radians) matches SciPy's 'degrees=True' rotvec semantics.
+    vnorm = jnp.linalg.norm(v)
+    angle_eff_rad = jnp.deg2rad(jnp.asarray(angle, dtype=coords.dtype)) * vnorm
+    Rmat = _rodrigues(v, angle_eff_rad)              # (3,3)
     return coords @ Rmat.T
 
 
@@ -337,7 +371,7 @@ def interpolate_vector(
         ],
         axis=-1,
     )
-    return spherical_vec_to_cartesian(v_sph, coords_cart, bbox)
+    return spherical_vec_to_cartesian(v_sph, coords_cart)
 
 
 # -----------------------------------------------------------------------------
