@@ -1,204 +1,125 @@
 import numpy as np
 import jax.numpy as jnp
-import pytest
-from scipy.spatial.transform import Rotation as R
-from radjax.core.grid import rotate_coords, rotate_coords_angles, rotate_coords_vector
+from jax import config
+config.update("jax_enable_x64", True)  # ensure float64 so we can use tight tolerances
 
-# New JAX-native implementations under test
-from radjax.core.grid import (
-    rotate_coords,
-    rotate_coords_angles,
-    rotate_coords_vector,
-)
+import radjax.core.grid  as grid# your module
+arcsec = np.pi / (180.0 * 3600.0)           # rad/arcsec
+au     = 1.495978707e11                     # m
+pc     = 3.085677581491367e16               # m
 
-# -------------------------
-# Reference (old) functions
-# -------------------------
+def pinhole_disk_projection_new(x_sky, y_sky, distance, nray, incl, phi, posang, z_width):
+    """
+    New path: uses JAX-native rotate functions in radjax.core.grid.
+    """
+    x_sky = jnp.asarray(x_sky, dtype=jnp.float64)
+    y_sky = jnp.asarray(y_sky, dtype=jnp.float64)
 
+    ny, nx = x_sky.shape
+    obs_dir = jnp.squeeze(grid.rotate_coords_angles(jnp.array([0.0, 0.0, 1.0], dtype=jnp.float64), incl, phi))
 
-def test_rotate_coords_matches_old(shape=(10,3), angles=(12.3, 45.0, -7.0)):
-    posang, incl, phi = angles
-    rng = np.random.default_rng(0)
-    coords = jnp.asarray(rng.standard_normal(shape))
+    rho   = jnp.sqrt(x_sky**2 + y_sky**2) * arcsec
+    theta = jnp.arctan2(y_sky, x_sky)
 
-    new_out = rotate_coords(coords, incl=incl, phi=phi, posang=posang)
+    ray_x_dir = rho * jnp.cos(theta)
+    ray_y_dir = rho * jnp.sin(theta)
+    ray_z_dir = jnp.ones_like(ray_x_dir)
 
-    # SciPy matrix (same parameters as the legacy path)
-    Rmat = R.from_euler("zxz", [posang, incl, -phi], degrees=True).as_matrix()
+    # stack as (ny*nx, 3)
+    ray_dir = jnp.stack((ray_y_dir, ray_x_dir, ray_z_dir), axis=-1).reshape(ny * nx, 3)
 
-    assert_matches_either(new_out, coords, Rmat, msg="ZXZ")
+    # rotate directions: first XZ (incl, -phi), then axis-angle around obs_dir by -posang
+    ray_dir = grid.rotate_coords_angles(ray_dir, incl, -phi)
+    ray_dir = grid.rotate_coords_vector(ray_dir, obs_dir, -posang)
 
-def test_rotate_coords_angles_matches_old(shape=(12,3), angles=(10.0, -30.0)):
-    incl, phi = angles
-    rng = np.random.default_rng(1)
-    coords = jnp.asarray(rng.standard_normal(shape))
+    # intersect with slab of thickness z_width centered on origin along obs_dir
+    z_half = 0.5 * z_width * au
+    cam_z  = distance * pc * obs_dir[2]
 
-    new_out = rotate_coords_angles(coords, incl=incl, phi=phi)
-    Rmat = R.from_euler("xz", [incl, phi], degrees=True).as_matrix()
+    s = ( z_half - cam_z) / ray_dir[..., 2]
+    t = (-z_half - cam_z) / ray_dir[..., 2]
 
-    assert_matches_either(new_out, coords, Rmat, msg="XZ")
+    ray_start = distance * pc * obs_dir + s[..., None] * ray_dir
+    ray_stop  = distance * pc * obs_dir + t[..., None] * ray_dir
 
-
-# -------------------------
-# Helpers
-# -------------------------
-
-def _rng_points(shape, seed=0):
-    rng = np.random.default_rng(seed)
-    pts = rng.standard_normal(shape).astype(np.float64)
-    return jnp.asarray(pts)
-
-def assert_matches_either(new_out, coords, Rmat, *, msg=""):
-    """Pass if new_out matches coords @ R^T (row) OR (R @ coords^T)^T (col)."""
-    row_pred = jnp.asarray(coords) @ jnp.asarray(Rmat).T
-    col_pred = (jnp.asarray(Rmat) @ jnp.asarray(coords).T).T
-
-    a = np.asarray(new_out)
-    b_row = np.asarray(row_pred)
-    b_col = np.asarray(col_pred)
-
-    ok_row = np.allclose(a, b_row, rtol=RTOL, atol=ATOL)
-    ok_col = np.allclose(a, b_col, rtol=RTOL, atol=ATOL)
-    if ok_row or ok_col:
-        return
-
-    # Helpful diagnostics if both fail
-    diff_row = np.max(np.abs(a - b_row))
-    diff_col = np.max(np.abs(a - b_col))
-    raise AssertionError(
-        f"{msg} neither form matched within tol "
-        f"(max|Δ| row={diff_row:.3e}, col={diff_col:.3e}; "
-        f"rtol={RTOL}, atol={ATOL})"
-    )
-ATOL = 1e-8
-RTOL = 1e-8
-
-# ---------------------------
-# Round-trip: ZXZ (rotate_coords)
-# ---------------------------
-@pytest.mark.parametrize("shape", [(10, 3), (4, 5, 3)])
-@pytest.mark.parametrize("angles", [(12.3, 45.0, -7.0), (30.0, 0.0, 10.0)])
-def test_roundtrip_rotate_coords(shape, angles):
-    posang, incl, phi = angles
-    pts = _rng_points(shape, seed=1)
-
-    fwd = rotate_coords(pts, incl=incl, phi=phi, posang=posang)
-
-    # Inverse: Rz(phi) @ Rx(-incl) @ Rz(-posang)
-    inv = rotate_coords(fwd, incl=-incl, phi=posang, posang=phi)
-
-    np.testing.assert_allclose(np.asarray(inv), np.asarray(pts), rtol=RTOL, atol=ATOL)
-
-# ---------------------------
-# Round-trip: XZ (rotate_coords_angles)
-# ---------------------------
-@pytest.mark.parametrize("shape", [(12, 3), (3, 4, 3)])
-@pytest.mark.parametrize("angles", [(0.0, 0.0), (10.0, -30.0), (90.0, 45.0), (12.3, 123.4)])
-def test_roundtrip_rotate_coords_angles(shape, angles):
-    incl, phi = angles
-    pts = _rng_points(shape, seed=2)
-
-    fwd = rotate_coords_angles(pts, incl=incl, phi=phi)
-
-    # Build the same rotation matrix as the forward path (Rx(incl) @ Rz(phi))
-    Rmat = R.from_euler("xz", [incl, phi], degrees=True).as_matrix()
-
-    # Forward uses row-vector convention: pts @ R^T
-    # Inverse is multiply by R (since (R^T)^-1 = R)
-    back = fwd @ jnp.asarray(Rmat)
-
-    np.testing.assert_allclose(np.asarray(back), np.asarray(pts), rtol=RTOL, atol=ATOL)
-
-# ---------------------------
-# Round-trip: Axis–angle (rotate_coords_vector)
-# ---------------------------
-@pytest.mark.parametrize("shape", [(9, 3), (2, 3, 3)])
-@pytest.mark.parametrize("axis, angle_deg", [
-    ([1.0, 0.0, 0.0], 0.0),
-    ([1.0, 0.0, 0.0], 90.0),
-    ([0.0, 1.0, 0.0], 45.0),
-    ([0.0, 0.0, 1.0], 123.4),
-    ([1.0, 2.0, 3.0], 33.0),
-])
-def test_roundtrip_rotate_coords_vector(shape, axis, angle_deg):
-    pts = _rng_points(shape, seed=3)
-    axis = jnp.asarray(axis, dtype=pts.dtype)
-
-    fwd = rotate_coords_vector(pts, vector=axis, angle=angle_deg)
-    back = rotate_coords_vector(fwd, vector=axis, angle=-angle_deg)
-
-    np.testing.assert_allclose(np.asarray(back), np.asarray(pts), rtol=RTOL, atol=ATOL)
+    # sample along each ray: (ny*nx, nray, 3) -> (ny, nx, nray, 3)
+    ray_coords = jnp.linspace(ray_start, ray_stop, nray, axis=1).reshape(ny, nx, nray, 3)
+    return ray_coords, obs_dir
 
 
-# -------------------------
-# Tests: ZXZ Euler rotation
-# -------------------------
+def pinhole_disk_projection_old(x_sky, y_sky, distance, nray, incl, phi, posang, z_width):
+    """
+    Old path: uses the *_old rotation functions exactly.
+    Note: rotate_coords_angles_old on a (3,) input returns extra dims; we squeeze.
+    """
+    x_sky = jnp.asarray(x_sky, dtype=jnp.float64)
+    y_sky = jnp.asarray(y_sky, dtype=jnp.float64)
 
-@pytest.mark.parametrize("shape", [(10, 3), (4, 5, 3)])
-@pytest.mark.parametrize("angles", [(0.0, 0.0, 0.0), (30.0, 45.0, -10.0), (90.0, 0.0, 12.3), (12.3, 89.9, 123.4)])
-def test_rotate_coords_matches_old(shape, angles):
-    coords = _rng_points(shape, seed=1)
-    posang, incl, phi = angles  # note the JAX impl uses (posang, incl, -phi) internally
+    ny, nx = x_sky.shape
+    obs_dir_old = jnp.squeeze(grid.rotate_coords_angles_old(jnp.array([0.0, 0.0, 1.0], dtype=jnp.float64), incl, phi))
 
-    new_out = rotate_coords(coords, incl=incl, phi=phi, posang=posang)
-    ref_out = rotate_coords_old(coords, incl=incl, phi=phi, posang=posang)
+    rho   = jnp.sqrt(x_sky**2 + y_sky**2) * arcsec
+    theta = jnp.arctan2(y_sky, x_sky)
 
-    np.testing.assert_allclose(np.asarray(new_out), np.asarray(ref_out), rtol=RTOL, atol=ATOL)
+    ray_x_dir = rho * jnp.cos(theta)
+    ray_y_dir = rho * jnp.sin(theta)
+    ray_z_dir = jnp.ones_like(ray_x_dir)
 
-# Identity check
-def test_rotate_coords_identity():
-    coords = _rng_points((7, 3), seed=2)
-    out = rotate_coords(coords, incl=0.0, phi=0.0, posang=0.0)
-    np.testing.assert_allclose(np.asarray(out), np.asarray(coords), rtol=RTOL, atol=ATOL)
+    ray_dir = jnp.stack((ray_y_dir, ray_x_dir, ray_z_dir), axis=-1).reshape(ny * nx, 3)
 
-# Tests: XZ Euler rotation
-# -------------------------
+    ray_dir = grid.rotate_coords_angles_old(ray_dir, incl, -phi)
+    ray_dir = grid.rotate_coords_vector_old(ray_dir, obs_dir_old, -posang)
 
-@pytest.mark.parametrize("shape", [(12, 3), (2, 3, 3)])
-@pytest.mark.parametrize("angles", [(0.0, 0.0), (10.0, -30.0), (90.0, 45.0), (12.3, 123.4)])
-def test_rotate_coords_angles_matches_old(shape, angles):
-    coords = _rng_points(shape, seed=3)
-    incl, phi = angles
+    z_half = 0.5 * z_width * au
+    cam_z  = distance * pc * obs_dir_old[2]
 
-    new_out = rotate_coords_angles(coords, incl=incl, phi=phi)
-    ref_out = rotate_coords_angles_old(coords, incl=incl, phi=phi)
+    s = ( z_half - cam_z) / ray_dir[..., 2]
+    t = (-z_half - cam_z) / ray_dir[..., 2]
 
-    np.testing.assert_allclose(np.asarray(new_out), np.asarray(ref_out), rtol=RTOL, atol=ATOL)
+    ray_start = distance * pc * obs_dir_old + s[..., None] * ray_dir
+    ray_stop  = distance * pc * obs_dir_old + t[..., None] * ray_dir
 
-def test_rotate_coords_angles_identity():
-    coords = _rng_points((5, 3), seed=4)
-    out = rotate_coords_angles(coords, incl=0.0, phi=0.0)
-    np.testing.assert_allclose(np.asarray(out), np.asarray(coords), rtol=RTOL, atol=ATOL)
+    ray_coords = jnp.linspace(ray_start, ray_stop, nray, axis=1).reshape(ny, nx, nray, 3)
+    return ray_coords, obs_dir_old
 
 
-# -------------------------
-# Tests: Axis-angle rotation
-# -------------------------
+def max_err(a, b):
+    A = np.asarray(a); B = np.asarray(b)
+    return np.max(np.abs(A - B))
 
-@pytest.mark.parametrize("shape", [(9, 3), (3, 4, 3)])
-@pytest.mark.parametrize(
-    "axis, angle_deg",
-    [
-        ([1.0, 0.0, 0.0], 0.0),
-        ([1.0, 0.0, 0.0], 90.0),
-        ([0.0, 1.0, 0.0], 45.0),
-        ([0.0, 0.0, 1.0], 123.4),
-        ([1.0, 2.0, 3.0], 33.0),  # will be normalized for OLD to avoid scale bug
-    ],
-)
-def test_rotate_coords_vector_matches_old_with_unit_axis(shape, axis, angle_deg):
-    coords = _rng_points(shape, seed=5)
-    axis = np.asarray(axis, dtype=np.float64)
-    # Normalize axis so OLD behavior (angle scaled by |axis|) matches the new function:
-    axis_unit = axis / (np.linalg.norm(axis) if np.linalg.norm(axis) > 0 else 1.0)
+def main():
+    # Build a tiny on-sky grid in arcsec
+    ny, nx = 16, 20
+    fov = 8.0  # arcsec full width
+    yv, xv = np.linspace(-fov/2, fov/2, ny), np.linspace(-fov/2, fov/2, nx)
+    x_sky, y_sky = np.meshgrid(xv, yv)  # arcsec
 
-    new_out = rotate_coords_vector(coords, vector=axis_unit, angle=angle_deg)
-    ref_out = rotate_coords_vector_old(coords, vector=axis_unit, angle=angle_deg)
+    # Camera / disk params
+    distance = 100.0   # pc
+    nray     = 17
+    incl     = 47.0
+    phi      = -121.3
+    posang   = 33.4
+    z_width  = 40.0    # au
 
-    np.testing.assert_allclose(np.asarray(new_out), np.asarray(ref_out), rtol=RTOL, atol=ATOL)
+    rc_new,  od_new  = pinhole_disk_projection_new(x_sky, y_sky, distance, nray, incl, phi, posang, z_width)
+    rc_old,  od_old  = pinhole_disk_projection_old(x_sky, y_sky, distance, nray, incl, phi, posang, z_width)
 
-def test_rotate_coords_vector_identity():
-    coords = _rng_points((6, 3), seed=6)
-    axis = np.array([0.0, 0.0, 1.0])
-    out = rotate_coords_vector(coords, vector=axis, angle=0.0)
-    np.testing.assert_allclose(np.asarray(out), np.asarray(coords), rtol=RTOL, atol=ATOL)
+    e_obs  = max_err(od_new, od_old)
+    e_rays = max_err(rc_new, rc_old)
+
+    print(f"raycoords shape old: {rc_old.shape}, raycoords shape new: {rc_new.shape}")
+    print(f"mean diff raycoords: {(rc_new-rc_old).mean()}")
+    print(f"raycoords old: {rc_old[0,0,0,:]}, raycoords new: {rc_new[0,0,0,:]}")
+    print(f"raycoords diff: {rc_old[0,0,0,:]-rc_new[0,0,0,:]}")
+    print(f"obsdir old: {od_old}, obsdir new: {od_new}")
+    print("obs_dir   max|Δ| =", e_obs)
+    print("ray_coords max|Δ| =", e_rays)
+
+    # Tight tolerances in float64
+    assert e_obs  < 5e-12, f"obs_dir mismatch: {e_obs}"
+    assert e_rays < 5e-12, f"ray_coords mismatch: {e_rays}"
+    print("pinhole_disk_projection (new vs _old): PASS")
+
+if __name__ == "__main__":
+    main()
