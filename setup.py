@@ -34,8 +34,7 @@ setup(
         "h5py",
     ],
     extras_require={
-        "dev": [pytest tests/test_grid_rotations.py
-
+        "dev": [
             "pytest",
             "black",
             "isort",
