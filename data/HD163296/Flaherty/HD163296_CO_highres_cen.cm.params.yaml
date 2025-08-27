@@ -1,0 +1,75 @@
+# HD163296 / Flaherty — CO(2-1)
+# metadata for a single ALMA FITS observation + associated parametric disk model.
+# Conventions:
+#   - Observation: angles in degrees; distance in pc; sky in arcsec; velocities in m/s; frequencies in GHz
+#   - Disk: r,z in AU; M_star, M_gas in solar masses; T in K; velocities in km/s unless noted
+#   - Columns (N_*) in cm^-2
+
+name: "HD163296 - Flaherty CO(2-1)"     # dataset + molecule + transition
+
+# File paths associated with this config
+fits_cube_path: "data/HD163296/Flaherty/HD163296_CO_highres_cen.cm.fits"
+
+
+# -----------------------------
+# Chemistry & line selection (flat keys, not nested)
+# -----------------------------
+chemistry:
+  molecule: CO                                                 # species label
+  line_index: 2                                                # J-upper index for CO(J->J-1), e.g., 3 for CO(2-1)
+  line_name: "CO(2-1)"                                         # descriptive tag
+  co_abundance: 1.0e-4                                         # CO abundance fraction (used by model chemistry)
+  freezeout_K: 19.0                                            # [K] freezeout threshold
+  N_dissoc_cm2: 1.256e21                                       # # [cm^-2] 0.79 * 1.59e21 CO dissociation threshold
+  molecular_table: "data/molecular_tables/molecule_12c16o.inp" # associated molecular table
+
+# -----------------------------
+# Observation (ALMA sensor / viewing geometry)
+# -----------------------------
+observation:
+  distance: 122.0                       # [pc] source distance
+  fov: 11.0                             # [arcsec] field of view (image-plane extent)
+
+  velocity_range:                       # [m/s] min/max velocity channels in the cube
+    - 2000.0
+    - 10000.0
+  vlsr: 5760.0                          # [m/s] systemic velocity (LSRK/LSR as used)
+
+  nray: 100                             # samples along each ray (slab integration)
+  incl: 47.5                            # [deg] disk inclination
+  phi: 0.0                              # [deg] azimuthal viewing angle
+  posang: 312.0                         # [deg] position angle (east of north)
+  z_width: 400.0                        # [AU] vertical slab thickness for ray construction
+
+# -----------------------------
+# Disk (parametric model)
+# -----------------------------
+disk:
+  # Thermal structure
+  T_mid1: 17.8                          # [K] midplane temperature normalization
+  T_atm1: 87.0                          # [K] atmosphere temperature normalization
+  q: -0.27                              # radial exponent (outer disk)
+  q_in: -0.57                           # radial exponent (inner disk)
+  r_break: 70.0                         # [AU] break radius between q_in/q
+  log_r_c: 2.3                          # log(r_c [AU]) (characteristic radius)
+  gamma: 1.0                            # surface-density power-law index
+
+  # Mass content
+  M_star: 2.3                           # [M_sun] stellar mass
+  M_gas: 0.09                           # [M_sun] total gas mass
+
+  # Geometry / scaling
+  r_in: 11.0                            # [AU] inner truncation radius
+  r_scale: 150.0                        # [AU] reference scaling radius
+  z_q0: 70.0                            # [AU] height scaling for T_peak
+  delta: 1.0                            # blending exponent for T(z)
+
+  # Kinematics
+  v_turb: 0.06                          # Dimensionless turbulence parameter (scales local sound speed)
+
+  # Resolution / grid sampling (model grid)
+  resolution: 500                       # radial grid resolution
+  z_min: 0.0                            # [AU] minimum height
+  z_max: 200.0                          # [AU] maximum height
+  r_min: 11.0                           # [AU] radial inner bound (same as r_in)
+  r_max: 800.0                          # [AU] radial outer bound
