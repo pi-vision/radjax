@@ -21,8 +21,8 @@ conda activate jax
 #### 2. Install CUDA (Linux + NVIDIA GPU only)
 ```
 conda install cuda -c nvidia
-
 ```
+
 #### 3. Install JAX (platform-specific)
 Follow the official [JAX installation guide](https://docs.jax.dev/en/latest/installation.html).
 Use the variant matching your system:
@@ -35,15 +35,27 @@ pip install "jax[cuda12]"
 
 # macOS (Apple Silicon, Metal)
 pip install "jax[cpu]" "jax-metal"
-
 ```
 
-#### 4. Install radjax (-e for developer mode) 
+#### 4. Install radjax (-e for editable/developer mode) 
 ```
 git clone https://github.com/aviadlevis/radjax.git
 cd radjax
 pip install -e .
 ```
+
+#### Editable install notes (-e flag)
+This project uses a modern `pyproject.toml` build (PEP 660).  
+If you see an error like:
+```
+A "pyproject.toml" file was found, but editable mode currently requires a setuptools-based build.
+```
+
+it usually means your `pip` / `setuptools` are too old. Fix it by upgrading in your environment:
+```
+python -m pip install --upgrade pip setuptools wheel
+```
+
 
 #### 5. Optional: visualization + MCMC tools
 ```

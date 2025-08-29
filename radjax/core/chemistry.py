@@ -46,6 +46,7 @@ from .consts import (
 
 @struct.dataclass
 class MolecularData:
+    nu0: float 
     transition: int                      # 1-based J-upper index (e.g., 2 for CO J=2-1): 
     energy_levels: jnp.ndarray
     radiative_transitions: jnp.ndarray
@@ -61,6 +62,7 @@ class MolecularData:
       - `chem_params.line_index`      : 1-based transition index (e.g., 2 for CO J=2-1)
 
     It returns a MolecularData container bundling:
+      - line central frequency
       - full energy level table
       - full radiative transitions table
       - selected line rest frequency (`nu0`)
@@ -93,7 +95,7 @@ def load_molecular_tables(chem_params: "ChemistryParams") -> MolecularData:
     Returns
     -------
     mol : MolecularData
-        Container with energy levels, radiative transitions,
+        Container with nu0, energy levels, radiative transitions,
         and Einstein coefficients for the chosen transition.
 
     Notes
@@ -122,12 +124,13 @@ def load_molecular_tables(chem_params: "ChemistryParams") -> MolecularData:
     radiative_transitions = np.loadtxt(table_path, skiprows=51, max_rows=40)
 
     # Compute Einstein A, B coefficients for this transition
-    a_ud, b_ud, b_du = einstein_coefficients(
+    nu0, a_ud, b_ud, b_du = einstein_coefficients(
         energy_levels, radiative_transitions, transition=chem_params.line_index
     )
 
     # Wrap in MolecularData
     return MolecularData(
+        nu0=nu0, 
         transition=chem_params.line_index,
         energy_levels=energy_levels,
         radiative_transitions=radiative_transitions,
@@ -182,7 +185,7 @@ def einstein_coefficients(
     a_ud = radiative_transitions[line_index, 3]
     b_ud = (cc**2 / (2 * hh * nu0**3)) * a_ud
     b_du = b_ud * gratio
-    return a_ud, b_ud, b_du
+    return nu0, a_ud, b_ud, b_du
 
 def n_up_down(
     gas_nd: jnp.ndarray,

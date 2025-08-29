@@ -49,82 +49,110 @@ class RayBundle:
 @struct.dataclass
 class ObservationParams:
     """
-    Params describing an observation dataset or projection config.
-    Stored in a compact YAML-friendly format.
+    Observation / projection configuration.
 
-    Attributes
-    ----------
-    name : str
-        Human-readable dataset name.
-    distance : float
-        Source distance in parsecs.
-    fov : float
-        Field of view in arcseconds.
-    velocity_range : Tuple[float, float]
-        Min/max velocity range in m/s.
-    vlsr : float
-        Local Standard of Rest velocity in m/s.
-    nray : int
-        Number of samples along each ray.
-    incl : float
-        Inclination angle [deg].
-    phi : float
-        Azimuthal angle [deg].
-    posang : float
-        Position angle [deg].
-    z_width: float
-        Physical width of the slab in AU (rays go from ± z_width/2)
+    Two mutually exclusive modes:
+    - REAL:     provide velocity_range=(vmin, vmax) [m/s] and vlsr [m/s]
+    - SYNTHETIC: provide velocity_width_kms [km/s] only (no vlsr, no velocity_range)
+
+    Common fields:
+      name:      dataset identifier
+      distance:  [pc]
+      fov:       [arcsec]
+      nray:      samples along each ray
+      incl, phi, posang: [deg]
+      z_width:   [AU] (rays traverse ± z_width/2)
     """
+    # Common
     name: str
     distance: float
     fov: float
-    velocity_range: Tuple[float, float]
-    vlsr: float
-    nray: int
-    incl: float
-    phi: float
-    posang: float
-    z_width: float             
-    
+    nray: int = 100
+    incl: float = 0.0
+    phi: float = 0.0
+    posang: float = 0.0
+    z_width: float = 400.0
 
-def orthographic_projection(
-    npix: int,
-    nray: int,
-    incl: float,
-    phi: float,
-    posang: float,
-    fov: float,
-    z_width: float,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Build parallel (orthographic) rays through a slab of thickness `z_width`.
-    """
-    obs_dir = grid.rotate_coords(jnp.array([0.0, 0.0, 1.0]), incl, phi, posang)
+    # REAL mode fields
+    velocity_range: Optional[Tuple[float, float]] = None  # (vmin, vmax) in m/s
+    vlsr: Optional[float] = None                          # m/s
 
-    # Regular grid in camera plane and along z (in world coords)
-    ray_x = jnp.linspace(-0.5, 0.5, npix) * fov * (npix - 1) / npix
-    ray_y = jnp.linspace(-0.5, 0.5, npix) * fov * (npix - 1) / npix
-    ray_z = jnp.linspace(-0.5, 0.5, nray) * z_width / obs_dir[2]
+    # SYNTHETIC mode field
+    velocity_width_kms: Optional[float] = None            # km/s
 
-    coords_grid = jnp.stack(jnp.meshgrid(ray_x, ray_y, ray_z, indexing="xy"), axis=-1).reshape(npix * npix, nray, 3)
-    ray_coords = grid.rotate_coords(coords_grid, incl, phi, posang)
+    # ---- validations & mode logic ----
+    def __post_init__(self):
+        has_range = self.velocity_range is not None
+        has_vlsr  = self.vlsr is not None
+        has_width = self.velocity_width_kms is not None
 
-    # Center the slab around z=0 by shifting along obs_dir
-    xy_plane = jnp.stack(
-        jnp.meshgrid(ray_x, ray_y, jnp.array([0.0]), indexing="xy"), axis=-1
-    ).reshape(npix * npix, 1, 3)
-    xy_plane_rot = grid.rotate_coords(xy_plane, incl, phi, posang)
-    s = xy_plane_rot[..., 2] / obs_dir[2]
-    ray_coords = ray_coords - s[..., None] * obs_dir
+        # Enforce XOR modes
+        if (has_range or has_vlsr) and has_width:
+            raise ValueError("Provide EITHER (velocity_range & vlsr) for REAL mode OR velocity_width_kms for SYNTHETIC mode, not both.")
+        if has_width:
+            # SYNTHETIC mode
+            if has_range or has_vlsr:
+                raise ValueError("In SYNTHETIC mode, do not provide velocity_range or vlsr.")
+            if self.velocity_width_kms <= 0:
+                raise ValueError("velocity_width_kms must be positive.")
+        else:
+            # REAL mode
+            if not (has_range and has_vlsr):
+                raise ValueError("In REAL mode, provide BOTH velocity_range (vmin, vmax) and vlsr.")
+            vmin, vmax = self.velocity_range
+            if not isinstance(vmin, (int, float)) or not isinstance(vmax, (int, float)):
+                raise TypeError("velocity_range must be a tuple of floats (vmin, vmax) in m/s.")
+            if vmax <= vmin:
+                raise ValueError("velocity_range must satisfy vmax > vmin.")
+            # no constraint on sign of vlsr; it’s frame-dependent
 
-    # Far → near ordering
-    ray_coords = ray_coords[:, ::-1]
-    return ray_coords, obs_dir
+        # Basic sanity (shared)
+        if self.distance <= 0:
+            raise ValueError("distance must be positive [pc].")
+        if self.fov <= 0:
+            raise ValueError("fov must be positive [arcsec].")
+        if self.nray <= 0:
+            raise ValueError("nray must be positive.")
+        if self.z_width <= 0:
+            raise ValueError("z_width must be positive [AU].")
 
-orthographic_projection_jit = jax.jit(
-    orthographic_projection, 
-    static_argnames=("npix", "nray")
-)
+    # ---- mode flags ----
+    @property
+    def is_synthetic(self) -> bool:
+        return self.velocity_width_kms is not None
+
+    @property
+    def is_real(self) -> bool:
+        return not self.is_synthetic
+
+    # ---- convenience getters ----
+    @property
+    def velocity_width_ms(self) -> float:
+        """Return spectral span in m/s (REAL: derived from range; SYNTHETIC: from width)."""
+        if self.is_synthetic:
+            return float(self.velocity_width_kms) * 1_000.0
+        vmin, vmax = self.velocity_range  # type: ignore
+        return float(vmax - vmin)
+
+    def velocity_center_ms(self) -> float:
+        """
+        Center velocity for grid construction:
+        - REAL: vlsr
+        - SYNTHETIC: 0 m/s (by convention; adjust if you want a non-zero center)
+        """
+        return 0.0 if self.is_synthetic else float(self.vlsr)  # type: ignore
+
+    def velocity_bounds_ms(self) -> Tuple[float, float]:
+        """
+        Bounds for channel construction:
+        - REAL: return (vmin, vmax)
+        - SYNTHETIC: symmetric around 0, i.e., (-width/2, +width/2)
+        """
+        if self.is_synthetic:
+            half = 0.5 * self.velocity_width_ms
+            return (-half, +half)
+        return self.velocity_range  # type: ignore    
+
 
 def rays_alma_projection(
     x_sky: "ArrayLike",          # [arcsec], shape (ny, nx)
@@ -205,7 +233,6 @@ def rays_alma_projection(
     
     return rays
 
-
 def rays_from_params(
     obs_params: ObservationParams, 
     x_sky: ArrayLike, 
@@ -252,18 +279,41 @@ def params_from_yaml(filename: str | Path) -> ObservationParams:
     # allow optional nested name override; fall back to top-level name if present
     name = o.get("name", cfg.get("name", ""))
 
-    return ObservationParams(
-        name=name,
-        distance=float(o["distance"]),
-        fov=float(o["fov"]),
-        velocity_range=(float(o["velocity_range"][0]), float(o["velocity_range"][1])),
-        vlsr=float(o["vlsr"]),
-        nray=int(o["nray"]),
-        incl=float(o["incl"]),
-        phi=float(o["phi"]),
-        posang=float(o["posang"]),
-        z_width=float(o["z_width"]),
-    )
+    # --- choose mode ---
+    if "velocity_range" in o and "vlsr" in o:
+        # REAL mode
+        vmin, vmax = o["velocity_range"]
+        return ObservationParams(
+            name=name,
+            distance=float(o["distance"]),
+            fov=float(o["fov"]),
+            velocity_range=(float(vmin), float(vmax)),
+            vlsr=float(o["vlsr"]),
+            nray=int(o["nray"]),
+            incl=float(o["incl"]),
+            phi=float(o["phi"]),
+            posang=float(o["posang"]),
+            z_width=float(o["z_width"]),
+        )
+    elif "velocity_width_kms" in o:
+        # SYNTHETIC mode
+        return ObservationParams(
+            name=name,
+            distance=float(o["distance"]),
+            fov=float(o["fov"]),
+            velocity_width_kms=float(o["velocity_width_kms"]),
+            nray=int(o["nray"]),
+            incl=float(o["incl"]),
+            phi=float(o["phi"]),
+            posang=float(o["posang"]),
+            z_width=float(o["z_width"]),
+        )
+    else:
+        raise KeyError(
+            "Observation block must contain either "
+            "`velocity_range` + `vlsr` (REAL mode) "
+            "or `velocity_width_kms` (SYNTHETIC mode)."
+        )
 
 
 def params_to_yaml(obs: ObservationParams, filename: str | Path) -> None:
@@ -293,18 +343,28 @@ def params_to_yaml(obs: ObservationParams, filename: str | Path) -> None:
         with open(path, "r") as f:
             doc = yaml.safe_load(f) or {}
 
-    # build fresh observation block from `obs`
-    obs_block = {
+    # --- Build observation block depending on mode ---
+    obs_block: Dict[str, Any] = {
         "distance": float(obs.distance),
         "fov": float(obs.fov),
-        "velocity_range": [float(obs.velocity_range[0]), float(obs.velocity_range[1])],
-        "vlsr": float(obs.vlsr),
         "nray": int(obs.nray),
         "incl": float(obs.incl),
         "phi": float(obs.phi),
         "posang": float(obs.posang),
         "z_width": float(obs.z_width),
     }
+
+    if obs.is_real:
+        vmin, vmax = obs.velocity_range
+        obs_block.update({
+            "velocity_range": [float(vmin), float(vmax)],
+            "velocity_width_kms": float(obs.velocity_width_kms),
+            "vlsr": float(obs.vlsr),
+        })
+    else:  # synthetic
+        obs_block.update({
+            "velocity_width_kms": float(obs.velocity_width_kms),
+        })
 
     # replace observation, preserve everything else
     doc["observation"] = obs_block
@@ -319,30 +379,41 @@ def params_to_yaml(obs: ObservationParams, filename: str | Path) -> None:
 
 def print_params(params: "ObservationParams") -> None:
     """
-    Nicely formatted summary of ALMA sensor params.
-
-    Parameters
-    ----------
-    params : ObservationParams
-        Params object loaded via `params_from_yaml(...)`.
+    Nicely formatted summary of observation parameters.
+    Handles both REAL (velocity_range + vlsr) and SYNTHETIC (velocity_width_kms) modes.
     """
-    print("Dataset name:              {}".format(params.name))
-    print("Distance (pc):            {:8.2f}".format(params.distance))
-    print("Field of view (arcsec):   {:8.3f}".format(params.fov))
-    print("Velocity range (m/s):     {:8.1f} → {:8.1f}".format(*params.velocity_range))
-    print("VLSR (m/s):               {:8.2f}".format(params.vlsr))
-    print("Number of rays:           {:8d}".format(params.nray))
-    print("Inclination (deg):        {:8.2f}".format(params.incl))
-    print("Phi (deg):                {:8.2f}".format(params.phi))
-    print("Position angle (deg):     {:8.2f}".format(params.posang))
-    print("Slab thickness z_width (au): {:8.2f}".format(params.z_width))
+    print("=" * 50)
+    print(f" Dataset name:            {params.name}")
+    print(f" Mode:                    {'REAL (observed cube)' if params.is_real else 'SYNTHETIC (toy cube)'}")
+    print("-" * 50)
+    print(f" Distance (pc):           {params.distance:8.2f}")
+    print(f" Field of view (arcsec):  {params.fov:8.3f}")
+
+    if params.is_real:
+        vmin, vmax = params.velocity_range
+        print(f" Velocity range (m/s):    {vmin:8.1f} → {vmax:8.1f}")
+        print(f" VLSR (m/s):              {params.vlsr:8.2f}")
+    else:  # synthetic
+        print(f" Velocity width (km/s):   {params.velocity_width_kms:8.2f}")
+        bounds = params.velocity_bounds_ms()
+        print(f" Velocity bounds (m/s):   {bounds[0]:8.1f} → {bounds[1]:8.1f}")
+        print(f" Center velocity (m/s):   {params.velocity_center_ms():8.2f}")
+
+    print("-" * 50)
+    print(f" Number of rays:          {params.nray:8d}")
+    print(f" Inclination (deg):       {params.incl:8.2f}")
+    print(f" Phi (deg):               {params.phi:8.2f}")
+    print(f" Position angle (deg):    {params.posang:8.2f}")
+    print(f" Slab thickness z_width (AU): {params.z_width:8.2f}")
+    print("=" * 50)
+
 
     
 # ----------------------------------------------------------------------------- #
 # Frequencies
 # ----------------------------------------------------------------------------- #
 def compute_camera_freqs(
-    linelam: int,
+    num_freqs: int,
     width_kms: float,
     nu0: float,
     v_sys: float = 0.0,
@@ -354,7 +425,7 @@ def compute_camera_freqs(
     """
     # Doppler offsets: map linear velocity window into frequency offsets
     # v positive (toward observer) reduces frequency → (1 - v/c)
-    v = (2 * jnp.arange(linelam) / (linelam - 1) - 1.0) * width_kms  # km/s
+    v = (2 * jnp.arange(num_freqs) / (num_freqs - 1) - 1.0) * width_kms  # km/s
     camera_freqs = nu0 * (1.0 - (v_sys * 1e5) / cc - (v * 1e5) / cc)
 
     if num_subfreq > 1:

@@ -21,7 +21,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import animation
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-
+from .consts import au
 
 # ----------------------------------------------------------------------------- #
 # Utilities
@@ -143,8 +143,161 @@ def compare_images(
 
 
 # ----------------------------------------------------------------------------- #
-# Interactive sliders (requires ipywidgets)
+# Interactive plots and sliders (requires ipywidgets)
 # ----------------------------------------------------------------------------- #
+def plot_ray_bundle_3d(
+    rays,
+    obs_params,
+    n_side: int = 8,
+    plane_alpha: float = 0.25,
+    midplane_alpha: float = 0.25,
+    line_alpha: float = 0.9,
+    line_width: float = 0.8,
+    cmap: str | None = None,
+    elev: float = 22,
+    azim: float = -60,
+    ax=None,
+):
+    """
+    3D visualize a subsampled bundle of rays in (x, y, z) with slab planes.
+
+    Parameters
+    ----------
+    rays : RayBundle
+        Must expose `coords_xyz` with shape (ny, nx, nray, 3) in **centimeters**.
+    obs_params : ObservationParams-like
+        Must expose `z_width` in AU (used for slab planes). If missing, defaults to 400 AU.
+    n_side : int
+        Subsample factor along each image dimension (plots ~n_side^2 rays).
+    plane_alpha : float
+        Opacity for the upper/lower slab planes (z = ± z_width/2).
+    midplane_alpha : float
+        Opacity for the midplane (z = 0).
+    line_alpha : float
+        Opacity for ray lines.
+    line_width : float
+        Line width for ray lines.
+    cmap : str | None
+        Optional Matplotlib colormap name to color-code rays by grid index. If None, uses default.
+    elev, azim : float
+        3D view angles passed to `ax.view_init`.
+    ax : mpl_toolkits.mplot3d.Axes3D | None
+        Existing 3D axes to draw on; if None, a new figure/axes is created.
+
+    Returns
+    -------
+    ax : mpl_toolkits.mplot3d.Axes3D
+        The axes with the plotted rays.
+    """
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    
+    coords = np.asarray(rays.coords_xyz)  # (ny, nx, nray, 3) in cm
+    if coords.ndim != 4 or coords.shape[-1] != 3:
+        raise ValueError("Expected rays.coords_xyz of shape (ny, nx, nray, 3)")
+
+    # ---- cm → AU conversion ----
+    coords_au = coords / au  # now in AU
+
+    ny, nx, _, _ = coords_au.shape
+    iy_idx = np.linspace(0, ny - 1, max(1, int(n_side)), dtype=int)
+    ix_idx = np.linspace(0, nx - 1, max(1, int(n_side)), dtype=int)
+
+    # Build color indices if requested
+    colors = None
+    if cmap is not None:
+        # map (iy, ix) to 0..1
+        ii, jj = np.meshgrid(np.arange(len(iy_idx)), np.arange(len(ix_idx)), indexing="ij")
+        norm = (ii.ravel() * len(ix_idx) + jj.ravel()) / (len(iy_idx) * len(ix_idx) - 1 + 1e-12)
+        cmap_fn = plt.get_cmap(cmap)
+        colors = cmap_fn(norm)
+
+    # Collect extents for plane sizing
+    xs, ys, zs = [], [], []
+    for k, iy in enumerate(iy_idx):
+        for l, ix in enumerate(ix_idx):
+            xyz = coords_au[iy, ix]  # (nray, 3)
+            xs.append(xyz[:, 0]); ys.append(xyz[:, 1]); zs.append(xyz[:, 2])
+    xs = np.concatenate(xs); ys = np.concatenate(ys); zs = np.concatenate(zs)
+
+    x_min, x_max = xs.min(), xs.max()
+    y_min, y_max = ys.min(), ys.max()
+    z_half = float(getattr(obs_params, "z_width", 400.0) / 2.0)  # AU
+
+    # Pad XY so planes don't clip
+    pad_xy = 0.05 * max(x_max - x_min, y_max - y_min)
+    xr = np.linspace(x_min - pad_xy, x_max + pad_xy, 12)
+    yr = np.linspace(y_min - pad_xy, y_max + pad_xy, 12)
+    X, Y = np.meshgrid(xr, yr)
+    Zp = z_half * np.ones_like(X)
+    Zn = -z_half * np.ones_like(X)
+    Z0 = 0.0 * X
+
+    # Set up axes
+    created_ax = False
+    if ax is None:
+        fig = plt.figure(figsize=(8, 6))
+        ax = fig.add_subplot(111, projection="3d")
+        created_ax = True
+
+    # Plot rays
+    color_i = 0
+    for k, iy in enumerate(iy_idx):
+        for l, ix in enumerate(ix_idx):
+            xyz = coords_au[iy, ix]
+            if colors is None:
+                ax.plot3D(xyz[:, 0], xyz[:, 1], xyz[:, 2], lw=line_width, alpha=line_alpha)
+            else:
+                ax.plot3D(xyz[:, 0], xyz[:, 1], xyz[:, 2], lw=line_width, alpha=line_alpha, color=colors[color_i])
+                color_i += 1
+
+    # Slab planes & midplane
+    ax.plot_surface(X, Y, Zp, alpha=plane_alpha, color="gray", edgecolor="none")
+    ax.plot_surface(X, Y, Zn, alpha=plane_alpha, color="gray", edgecolor="none")
+    ax.plot_surface(X, Y, Z0, alpha=midplane_alpha, color="k", edgecolor="none")
+
+    ax.set_xlabel("x [AU]")
+    ax.set_ylabel("y [AU]")
+    ax.set_zlabel("z [AU]")
+    ax.set_title("Ray bundle through disk slab")
+
+    # Box aspect if available (mpl ≥ 3.3); else fall back to limits
+    xrng = (x_max - x_min) + 2 * pad_xy
+    yrng = (y_max - y_min) + 2 * pad_xy
+    zrng = z_half * 5  # show a bit beyond planes
+    try:
+        ax.set_box_aspect((xrng, yrng, zrng))
+    except Exception:
+        ax.set_xlim(x_min - pad_xy, x_max + pad_xy)
+        ax.set_ylim(y_min - pad_xy, y_max + pad_xy)
+        ax.set_zlim(-z_half * 1.1, +z_half * 1.1)
+
+    ax.view_init(elev=elev, azim=azim)
+
+    # Annotate slab planes and midplane
+    ax.text(
+        x_min, y_min, 0.0,
+        "midplane (z=0 AU)",
+        color="k", fontsize=12
+    )
+    
+    ax.text(
+        x_min, y_min, +z_half,
+        f"z_max (+{z_half:.0f} AU)",
+        color="gray", fontsize=12
+    )
+    
+    ax.text(
+        x_min, y_min, -z_half,
+        f"z_min (−{z_half:.0f} AU)",
+        color="gray", fontsize=12
+    )
+    
+    if created_ax:
+        plt.tight_layout()
+        plt.show()
+
+    return ax
+
 def slider(
     movie: np.ndarray,
     fov: float = 1.0,
