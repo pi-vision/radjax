@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "radjax"
+version = "0.1.0"
+description = "JAX-based line radiative transfer for protoplanetary disks"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  { name = "Aviad Levis" },
+  { name = "Nhan (Len) Luong" }
+]
+urls = { Homepage = "https://github.com/aviadlevis/radjax" }
+
+dependencies = [
+  "flax",
+  "optax",
+  "diffrax",
+  "tensorboard",
+  "tensorboardX",
+  "numpy",
+  "scipy",
+  "scikit-learn",
+  "scikit-image",
+  "matplotlib",
+  "jupyterlab",
+  "tqdm",
+  "ipympl",
+  "mpmath",
+  "ruamel.yaml",
+  "corner",
+  "gofish",
+]
+
+[project.optional-dependencies]
+jax-cpu    = ["jax[cpu]>=0.4"]
+jax-cuda12 = ["jax[cuda12]>=0.4"]
+jax-metal  = ["jax[cpu]>=0.4", "jax-metal>=0.0.7"]
+dev = ["pytest", "black", "isort", "sphinx", "myst-parser", "nbsphinx"]
+
+[tool.setuptools]
+include-package-data = true           # ensure package data is included
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["radjax*"]
+
+[tool.setuptools.package-data]
+radjax = ["data/molecular_tables/*.inp"]

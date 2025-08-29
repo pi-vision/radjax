@@ -19,115 +19,11 @@ from .consts import (
     cc,          # speed of light      [cm/s]
     hh,          # Planck constant     [erg*s]
     kk,          # Boltzmann constant  [erg/K]
-    ghz,         # GHz -> Hz (or consistent internal units)
     pc,          # parsec [cm]
     m_co,        # molecular mass of CO [g] (or consistent units)
     m_mol_h      # mean molecular mass of hydrogen gass [g] (or consistent units)
 )
 
-def einstein_coefficients(
-    energy_levels: jnp.ndarray,
-    radiative_transitions: jnp.ndarray,
-    transition: int = 3,
-) -> Tuple[float, float, float, float]:
-    """
-    Compute Einstein coefficients for a specific radiative transition.
-
-    Parameters
-    ----------
-    energy_levels : jnp.ndarray
-        Shape (num_levels, 4). Columns:
-        [LEVEL, ENERGIES(cm^-1), WEIGHT, J]
-    radiative_transitions : jnp.ndarray
-        Shape (num_levels-1, 6). Columns:
-        [TRANS, UP, LOW, EINSTEINA(s^-1), FREQ(GHz), E_u(K)]
-    transition : int, optional
-        1-based index of the line (e.g., 3 for CO(3-2)), by default 3.
-
-    Returns
-    -------
-    (nu0, a_ud, b_ud, b_du) : Tuple[float, float, float, float]
-        nu0 : line rest frequency (in your internal frequency units)
-        a_ud : Einstein A (spontaneous emission)
-        b_ud : Einstein B (stimulated emission, up->down)
-        b_du : Einstein B (absorption, down->up)
-
-    Notes
-    -----
-    - gratio = weight_UP / weight_LOW
-    - b_ud = (c^2 / (2 h nu0^3)) * a_ud
-    - b_du = b_ud * gratio
-    
-    See: RADMC-3D line RT docs for background:
-    https://www.ita.uni-heidelberg.de/~dullemond/software/radmc-3d/manual_radmc3d/lineradtrans.html
-    """
-    # extract up and down indices from radiative transition table (e.g. 4,3 for second CO line at 345GHz)
-    line_index = transition - 1
-    nu0 = radiative_transitions[line_index, 4] * ghz
-    up_idx = jnp.array(radiative_transitions[line_index, 1] - 1, int)
-    dn_idx = jnp.array(radiative_transitions[line_index, 2] - 1, int)
-
-    gratio = energy_levels[up_idx, 2] / energy_levels[dn_idx, 2]
-    a_ud = radiative_transitions[line_index, 3]
-    b_ud = (cc**2 / (2 * hh * nu0**3)) * a_ud
-    b_du = b_ud * gratio
-    return nu0, a_ud, b_ud, b_du
-
-def n_up_down(
-    gas_nd: jnp.ndarray,
-    gas_t: jnp.ndarray,
-    energy_levels: jnp.ndarray,
-    radiative_transitions: jnp.ndarray,
-    transition: int = 3,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    LTE level populations for the chosen transition.
-
-    Parameters
-    ----------
-    gas_nd : jnp.ndarray
-        Number density (same shape as gas_t). 
-        example: (num_pix, num_pix, n_ray)
-    gas_t : jnp.ndarray
-        Temperature in Kelvin (same shape as gas_nd). 
-        example: (npix, npix, nray)
-    energy_levels : jnp.ndarray
-        Shape (num_levels, 4). See `einstein_coefficients`.
-    radiative_transitions : jnp.ndarray
-        Shape (num_levels-1, 6). See `einstein_coefficients`.
-    transition : int, optional
-        1-based index of the line, by default 3.
-
-    Returns
-    -------
-    n_up, n_dn : Tuple[jnp.ndarray, jnp.ndarray]
-        Up- and down-level number densities (same shape as gas_t/gas_nd).
-    """
-    # Temperature grid for partition function (log-spaced)
-    ntemp, temp0, temp1 = 1000, 0.1, 100000.0
-    partition_temp = temp0 * (temp1 / temp0) ** (jnp.arange(ntemp) / (ntemp - 1))
-
-    # Partition function from available levels
-    dendivk = (hh * cc / kk) * jnp.diff(energy_levels[:, 1])
-    dummy = jnp.exp(-dendivk[None] / partition_temp[:, None]) * (
-        energy_levels[1:, 2] / energy_levels[:-1, 2]
-    )
-    partition_fn = energy_levels[0, 2] + jnp.sum(jnp.cumprod(dummy, axis=-1), axis=-1)
-    pfunc = jnp.interp(gas_t, partition_temp, partition_fn)
-
-    # Identify up/down indices for chosen transition
-    line_index = transition - 1
-    up_idx = jnp.array(radiative_transitions[line_index, 1] - 1, int)
-    dn_idx = jnp.array(radiative_transitions[line_index, 2] - 1, int)
-
-    dendivk_up = (hh * cc / kk) * (energy_levels[up_idx, 1] - energy_levels[0, 1])
-    dendivk_dn = (hh * cc / kk) * (energy_levels[dn_idx, 1] - energy_levels[0, 1])
-    levelweight_up = energy_levels[up_idx, 2]
-    levelweight_dn = energy_levels[dn_idx, 2]
-
-    n_up = (gas_nd / pfunc) * jnp.exp(-dendivk_up / gas_t) * levelweight_up
-    n_dn = (gas_nd / pfunc) * jnp.exp(-dendivk_dn / gas_t) * levelweight_dn
-    return n_up, n_dn
 
 def compute_spectral_cube(
     camera_freqs: jnp.ndarray,
@@ -161,11 +57,11 @@ def compute_spectral_cube(
     ray_coords : jnp.ndarray
         Ray coordinates along last-but-one axis, shape (npix, npix, nray, 3).
     obs_dir : jnp.ndarray
-        Unit vector of the line of sight, shape (3,).
+        Unit vector of the line of sight (towards the observer), shape (3,) .
     nu0 : float
         Line rest frequency.
     pixel_area : float
-        Pixel solid-angle * distance^2 in cm^2 at 1 pc (used for Jy conversion).
+        Pixel solid-angle * distance^2 in cm^2 (used for Jy conversion).
 
     Returns
     -------
@@ -179,7 +75,7 @@ def compute_spectral_cube(
     """
     # Compute doppler shift
     # Note: doppler positive means moving toward observer, hence the minus sign
-    doppler = (1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
+    doppler = -(1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
 
     # Define a vector line profile over multiple camera frequencies 
     # The line profile is a Gaussian with width (alpha) and shifted by doppler
@@ -192,7 +88,7 @@ def compute_spectral_cube(
     #     h nu_0                                          h nu_0
     # j = ------ n_up A_ud * phi(omega, nu)   ;  alpha = ------ ( n_down B_du - n_up B_ud ) * phi(omega, nu)
     #     4 pi                                            4 pi
-    const = hh * nu0 / (4 * np.pi)
+    const = hh * nu0 / (4 * jnp.pi)
     j_nu  = const * n_up * a_ud  * line_profile
     a_nu  = const * (n_dn * b_du - n_up * b_ud) * line_profile
 
@@ -217,19 +113,6 @@ def compute_spectral_cube(
     # Conversion from erg/s/cm/cm/ster to Jy/pixel
     image_fluxes_jy =  pixel_area / pc**2 * 1e23 * intensity
     return image_fluxes_jy
-
-# Vectorize over frequency axis on a single device
-compute_spectral_cube_vmap = jax.vmap(
-    compute_spectral_cube,
-    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None),
-)
-
-# Parallelize over frequency axis across devices
-compute_spectral_cube_pmap = jax.pmap(
-    compute_spectral_cube,
-    axis_name="freq",
-    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None),
-)
 
 def alpha_total(
     v_turb: float,
@@ -261,6 +144,23 @@ def alpha_total(
     cs_sq = 2 * kk * gas_t / m_mol_h
     alpha_tot = jnp.sqrt(alpha_therm_sq + (v_turb**2) * cs_sq)
     return alpha_tot
+
+# ----------------------------------------------------------------------------- #
+# JIT wrappers & vectorized ops
+# ----------------------------------------------------------------------------- #
+
+# Parallelize over frequency axis across devices
+compute_spectral_cube_pmap = jax.pmap(
+    compute_spectral_cube,
+    axis_name="freq",
+    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None),
+)
+# Vectorize over frequency axis on a single device
+compute_spectral_cube_vmap = jax.vmap(
+    compute_spectral_cube,
+    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None),
+)
+
 
 
 __all__ = [

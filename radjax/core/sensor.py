@@ -25,17 +25,27 @@ import jax.numpy as jnp
 import jax.scipy as jsp
 import numpy as np
 
-from . import grid
+from . import grid, phys
+from . import chemistry as chem
+from . import line_rte
 from .consts import arcsec, au, pc, cc
 
 import yaml
 
-ArrayLike = Union[np.ndarray, jnp.ndarray]
+ArrayLike = Union[jnp.ndarray, jnp.ndarray]
 
 
 # ----------------------------------------------------------------------------- #
 # Projections
 # ----------------------------------------------------------------------------- #
+@struct.dataclass
+class RayBundle:
+    nx: int
+    ny: int
+    coords_xyz: jnp.ndarray   # (H, W, N, 3), world XYZ along each ray
+    pixel_area: jnp.ndarray   # (H, W), projected area per pixel in [sr] or [cm^2] on image plane
+    obs_dir: jnp.ndarray      # (3,), unit vector from source to observer
+    
 @struct.dataclass
 class ObservationParams:
     """
@@ -117,101 +127,100 @@ orthographic_projection_jit = jax.jit(
 )
 
 def rays_alma_projection(
-    x_sky: ArrayLike,
-    y_sky: ArrayLike,
-    distance: float,
+    x_sky: "ArrayLike",          # [arcsec], shape (ny, nx)
+    y_sky: "ArrayLike",          # [arcsec], shape (ny, nx)
+    distance: float,             # [pc]
     nray: int,
-    incl: float,
-    phi: float,
-    posang: float,
-    z_width: float,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    incl: float,                 # [deg]
+    phi: float,                  # [deg]
+    posang: float,               # [deg], roll about LOS
+    z_width: float,              # [au]
+    fov_as: float,               # [arcsec], total field of view on a side
+) -> "RayBundle":
     """
-    Construct pinhole rays through a finite-thickness disk slab.
-
-    Geometry
-    --------
-    Rays originate from a virtual pinhole located at ``distance * obs_dir`` and
-    pass through image-plane coordinates ``(x_sky, y_sky)`` (in arcsec). Start
-    and stop points are the intersections with two planes bounding the slab at
-    ``z = ± z_width/2`` (in AU, measured along the world Z-axis after applying
-    the viewing geometry).
-
-    Parameters
-    ----------
-    x_sky, y_sky : 2D arrays (arcsec)
-        Sky-plane coordinate grids. Must have identical shapes (ny, nx).
-    distance : float (pc)
-        Source distance in parsecs. Sets the pinhole location along the LOS.
-    nray : int
-        Number of sample points along each ray (discretization along depth).
-    incl, phi : float (deg)
-        Viewing angles applied via ``grid.rotate_coords_angles``. ``incl`` is the
-        tilt from +Z; ``phi`` is the azimuthal rotation about +Z.
-    posang : float (deg)
-        Additional rotation **about the line of sight** (roll) applied after
-        orienting by (incl, phi). Positive values rotate clockwise on the sky.
-    z_width : float (au)
-        Physical slab thickness; rays start on +z_half and end on −z_half.
+    Construct pinhole rays through a finite-thickness disk slab and return a RayBundle.
+    Always uses the provided FOV (arcsec) to compute a constant pixel_area (cm^2).
 
     Returns
     -------
-    ray_coords : (ny, nx, nray, 3) jnp.ndarray
-        Sampled world-space points along each ray from far→near.
-    obs_dir : (3,) jnp.ndarray
-        Unit line-of-sight vector in world coordinates after applying (incl, phi).
-
-    Notes
-    -----
-    - Angles are in **degrees**.
-    - ``x_sky, y_sky`` are in **arcseconds**; conversions use constants in ``consts``.
-    - Output coordinates are in the code's **world units** (same units as your grids).
+    RayBundle with:
+      - nx, ny: int
+      - coords_xyz: (ny, nx, nray, 3) world-space samples along each ray (far → near)
+      - pixel_area: (ny, nx) constant map of pixel area in cm^2
+      - obs_dir:    (3,) unit LOS in world coordinates after (incl, phi)
     """
-    x_sky = jnp.asarray(x_sky)
-    y_sky = jnp.asarray(y_sky)
+    # ---- inputs & shapes
+    x_sky = jnp.asarray(x_sky)  # [arcsec]
+    y_sky = jnp.asarray(y_sky)  # [arcsec]
     ny, nx = x_sky.shape
+    if y_sky.shape != (ny, nx):
+        raise ValueError("x_sky and y_sky must have identical shapes (ny, nx).")
+    npix = int(max(ny, nx))
 
-    # LOS in world coords after (incl, phi)
-    obs_dir = jnp.squeeze(grid.rotate_coords_angles(jnp.array([0.0, 0.0, 1.0]), incl, phi))  # (3,)
+    # ---- LOS after (incl, phi)
+    obs_dir = jnp.squeeze(
+        grid.rotate_coords_angles(jnp.array([0.0, 0.0, 1.0]), incl, phi)
+    )  # (3,)
 
-    # Pixel-to-ray direction in camera frame (arcsec → radians via arcsec constant)
-    rho = jnp.sqrt(x_sky**2 + y_sky**2) * arcsec
+    # ---- camera-frame directions (arcsec → rad)
+    rho   = jnp.sqrt(x_sky**2 + y_sky**2) * arcsec
     theta = jnp.arctan2(y_sky, x_sky)
     ray_x_dir = rho * jnp.cos(theta)
     ray_y_dir = rho * jnp.sin(theta)
     ray_z_dir = jnp.ones_like(ray_x_dir)
 
-    # Stack as (ny*nx, 3) and align to world; then roll about obs_dir by -posang
+    # stack (ny*nx, 3), align to world; roll by -posang about LOS
     ray_dir = jnp.stack((ray_y_dir, ray_x_dir, ray_z_dir), axis=-1).reshape(ny * nx, 3)
     ray_dir = grid.rotate_coords_angles(ray_dir, incl, -phi)
-    ray_dir = grid.rotate_coords_vector(ray_dir, obs_dir, -posang)
+    ray_dir = grid. rotate_coords_vector(ray_dir, obs_dir, -posang)
 
-    # Intersections with z = ± z_width/2 planes (world coords)
-    d_pc = distance * pc
-    zhalf = 0.5 * z_width * au
-    s = (zhalf - d_pc * obs_dir[2]) / ray_dir[..., 2]
-    t = (-zhalf - d_pc * obs_dir[2]) / ray_dir[..., 2]
-    ray_start = d_pc * obs_dir + s[..., None] * ray_dir
-    ray_stop  = d_pc * obs_dir + t[..., None] * ray_dir
+    # ---- intersections with z = ± z_width/2 (world coords in cm)
+    d_cm     = distance * pc
+    zhalf_cm = 0.5 * z_width * au
+    denom = ray_dir[..., 2]
+    denom = jnp.where(jnp.abs(denom) < 1e-30, jnp.sign(denom) * 1e-30, denom)
 
-    ray_coords = jnp.linspace(ray_start, ray_stop, nray, axis=1).reshape(ny, nx, nray, 3)
-    return ray_coords, obs_dir
+    s = ( zhalf_cm - d_cm * obs_dir[2]) / denom
+    t = (-zhalf_cm - d_cm * obs_dir[2]) / denom
+
+    ray_start = d_cm * obs_dir + s[..., None] * ray_dir  # (ny*nx, 3)
+    ray_stop  = d_cm * obs_dir + t[..., None] * ray_dir  # (ny*nx, 3)
+
+    ray_coords = jnp.linspace(ray_start, ray_stop, nray, axis=1)  # (ny*nx, nray, 3)
+    ray_coords = ray_coords.reshape(ny, nx, nray, 3)
+
+    # ---- pixel area from FOV (constant over the grid), in cm^2
+    # fov on the image plane at distance d: fov_cm = 2 * d * tan((fov_as*arcsec)/2)
+    fov_rad = fov_as * arcsec
+    fov_cm  = 2.0 * d_cm * jnp.tan(fov_rad / 2.0)
+    pixel_area = (fov_cm / float(npix)) ** 2
+
+    rays = RayBundle(
+        nx=nx, 
+        ny=ny, 
+        coords_xyz=ray_coords, 
+        pixel_area=pixel_area, 
+        obs_dir=obs_dir
+    )
+    
+    return rays
 
 
 def rays_from_params(
-    meta: ObservationParams, 
+    obs_params: ObservationParams, 
     x_sky: ArrayLike, 
     y_sky: ArrayLike
 ):
     return rays_alma_projection_jit(
         jnp.asarray(x_sky),
         jnp.asarray(y_sky),
-        float(meta.distance),
-        int(meta.nray),
-        float(meta.incl),
-        float(meta.phi),
-        float(meta.posang),
-        float(meta.z_width),
+        float(obs_params.distance),
+        int(obs_params.nray),
+        float(obs_params.incl),
+        float(obs_params.phi),
+        float(obs_params.posang),
+        float(obs_params.z_width),
+        float(obs_params.fov),
     )
 
 
@@ -308,7 +317,6 @@ def params_to_yaml(obs: ObservationParams, filename: str | Path) -> None:
         yaml.safe_dump(doc, f, sort_keys=False)
 
 
-
 def print_params(params: "ObservationParams") -> None:
     """
     Nicely formatted summary of ALMA sensor params.
@@ -360,8 +368,87 @@ def compute_camera_freqs(
 
 
 # ----------------------------------------------------------------------------- #
-# Volume projection
+# Volume sampling/ projection / rendering
 # ----------------------------------------------------------------------------- #
+def render_cube(
+    rays: "RayBundle",
+    nd_ray: jnp.ndarray,           # (H, W, N)
+    temperature_ray: jnp.ndarray,  # (H, W, N)
+    velocity_ray: jnp.ndarray,     # (H, W, N, 3)
+    *,
+    nu0: float,
+    freqs: jnp.ndarray,            # (F,) [Hz]
+    v_turb: float,
+    mol: "MolecularData",
+    backend: str = "vmap",         # {"vmap", "pmap", "none"}
+) -> jnp.ndarray:
+    """
+    Render I(ν, y, x) using pre-sampled ray fields and line data in `mol`.
+
+    Parameters
+    ----------
+    rays : RayBundle
+        nx, ny, coords_xyz, pixel_area, obs_dir describing ray geometry.
+    nd_ray : (H, W, N)
+        Number density along rays.
+    temperature_ray : (H, W, N)
+        Temperature along rays [K].
+    velocity_ray : (H, W, N, 3)
+        3D velocity vectors along rays.
+    nu0: float, 
+        Central frequency, e.g. from alma_cube.nu0
+    freqs : (F,)
+        Frequency channels [Hz].
+    v_turb : float
+        Microturbulent velocity (ensure units consistent with opacity kernel).
+    mol : MolecularData
+        Energy levels, transitions, and Einstein coefficients for one line.
+    backend : {"vmap", "pmap", "none"}, default="vmap"
+        Which compute backend to use for the spectral cube solver:
+          - "vmap" : run vectorized over frequency (default, usually fastest single-device)
+          - "pmap" : parallelize across multiple devices (if available)
+          - "none" : plain per-frequency loop (slow, but simplest)
+
+    Returns
+    -------
+    cube : (nfreq, ny, nx) jnp.ndarray
+        Spectral cube (NaNs sanitized).
+    """
+
+    from radjax.core.parallel import shard_with_padding
+
+    # LTE level populations
+    n_up, n_dn = chem.n_up_down(
+        nd_ray, temperature_ray,
+        mol.energy_levels, mol.radiative_transitions,
+        transition=mol.transition,
+    )
+
+    # Line opacity
+    alpha_tot = line_rte.alpha_total(v_turb, temperature_ray)
+
+    # Choose backend
+    if backend == "pmap":
+        compute_fn = line_rte.compute_spectral_cube_pmap
+        freqs = shard_with_padding(freqs)  # (ndev, F_per_dev)
+    elif backend == "vmap":
+        compute_fn = line_rte.compute_spectral_cube_vmap
+    elif backend == "none":
+        compute_fn = line_rte.compute_spectral_cube
+    else:
+        raise ValueError(f"Unknown backend={backend!r}. Must be 'vmap', 'pmap', or 'none'.")
+    
+    images = compute_fn(
+        freqs, velocity_ray, alpha_tot, n_up, n_dn,
+        mol.a_ud, mol.b_ud, mol.b_du,
+        rays.coords_xyz, rays.obs_dir, nu0, rays.pixel_area
+    )
+    images = np.nan_to_num(images).reshape(-1, rays.ny, rays.nx)[:freqs.size]
+    
+    return images
+
+
+
 def project_volume(volume: jnp.ndarray, coords: jnp.ndarray, bbox: jnp.ndarray) -> jnp.ndarray:
     """
     Integrate a scalar field along rays using midpoint rule.
@@ -373,6 +460,60 @@ def project_volume(volume: jnp.ndarray, coords: jnp.ndarray, bbox: jnp.ndarray) 
     mid = vals[..., :-1] + jnp.diff(vals, axis=-1) / 2.0
     projection = jnp.sum(mid * ds, axis=-1)
     return projection
+
+def sample_symmetric_disk__along_rays(
+    rays: "RayBundle",
+    bbox: jnp.ndarray,                  # shape (2,2): [[zmin,zmax],[rmin,rmax]] in cm
+    co_nd: jnp.ndarray,                 # (Nz, Nr)
+    temperature: jnp.ndarray,           # (Nz, Nr)
+    v_phi: jnp.ndarray,             # (Nz, Nr), azimuthal speed in disk frame
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    Interpolate **axisymmetric** disk fields (z–r grids) along a bundle of rays.
+
+    Assumptions
+    -----------
+    - The disk is mirror-symmetric and axisymmetric; fields are defined on a 2D (z, r) grid.
+    - Velocity is purely azimuthal (vφ); we reconstruct 3D velocity vectors along the rays.
+    - `rays` provides world-space sample coordinates; only `coords_xyz` is used here.
+
+    Parameters
+    ----------
+    rays : RayBundle
+        Container with:
+          - coords_xyz : (H, W, N, 3) world-space samples along each ray (far → near)
+          - pixel_area : (H, W) (unused here)
+          - obs_dir    : (3,) (unused here)
+    bbox : jnp.ndarray, shape (2,2)
+        Bounding box in cm, [[zmin, zmax], [rmin, rmax]], for cylindrical interpolation.
+    co_nd : jnp.ndarray, shape (Nz, Nr)
+        CO number density grid in the (z, r) plane.
+    temperature : jnp.ndarray, shape (Nz, Nr)
+        Temperature grid in the (z, r) plane.
+    v_phi : jnp.ndarray, shape (Nz, Nr)
+        Azimuthal velocity (scalar speed) grid in the (z, r) plane.
+
+
+    Returns
+    -------
+    nd_ray : jnp.ndarray, shape (H, W, N)
+        CO number density interpolated along rays.
+    temperature_ray : jnp.ndarray, shape (H, W, N)
+        Temperature interpolated along rays.
+    velocity_ray : jnp.ndarray, shape (H, W, N, 3)
+        3D velocity vectors along each ray, reconstructed from vφ.
+    """
+    ray_sph = grid.cartesian_to_spherical(rays.coords_xyz)   # (H, W, N, 3)
+    ray_zr  = grid.spherical_to_zr(ray_sph)                 # (H, W, N, 2): (z, r)
+
+    nd_ray   = grid.interpolate_scalar(co_nd, ray_zr, bbox)             # (H, W, N)
+    temperature_ray = grid.interpolate_scalar(temperature, ray_zr, bbox, cval=1e-10) # (H, W, N)
+    v_phi_ray = grid.interpolate_scalar(v_phi, ray_zr, bbox)             # (H, W, N)
+
+    # Convert azimuthal scalar speed to 3D velocity vectors along the rays
+    velocity_ray = phys.azimuthal_velocity(rays.coords_xyz, v_phi_ray)      # (H, W, N, 3)
+
+    return nd_ray, temperature_ray, velocity_ray
 
 
 # ----------------------------------------------------------------------------- #
@@ -394,7 +535,7 @@ def beam(
 
     sigma_maj = scale * bmaj / dpix / 2.355
     sigma_min = scale * bmin / dpix / 2.355
-    kernel = np.asarray(Gaussian2DKernel(x_stddev=sigma_min, y_stddev=sigma_maj, theta=np.radians(bpa)).array)
+    kernel = jnp.asarray(Gaussian2DKernel(x_stddev=sigma_min, y_stddev=sigma_maj, theta=np.radians(bpa)).array)
     return jnp.asarray(kernel)
 
     

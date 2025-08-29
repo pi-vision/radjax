@@ -10,7 +10,7 @@ masses in grams (consistent with G).
 """
 
 from __future__ import annotations
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from pathlib import Path
 import dataclasses as dc
 
@@ -22,8 +22,55 @@ from flax import struct
 import yaml
 
 # local constants
-from ..core.consts import M_sun
+from ..core.consts import M_sun, au, m_mol_h
+from ..core import phys
+from ..core import chemistry as chem
 
+@struct.dataclass
+class BaseDisk:
+    """
+    Container for disk grids and background H₂ fields.
+
+    Attributes
+    ----------
+    z : jnp.ndarray
+        Vertical grid [AU], shape (Nz,).
+    r : jnp.ndarray
+        Radial grid [AU], shape (Nr,).
+    z_r_mesh : jnp.ndarray
+        Stacked meshgrid (z, r) coordinates, shape (Nz, Nr, 2).
+    bbox : jnp.ndarray
+        2×2 array of [(z_min, z_max), (r_min, r_max)] in cgs [cm].
+
+    h2_nd : jnp.ndarray, optional
+        Local H2 number density n_H2(z,r) [cm^-3], shape (Nz, Nr).
+    h2_N : jnp.ndarray, optional
+        Vertical H2 column density N_H2(r) [cm^-2], shape (Nr,).
+    """
+
+    z: jnp.ndarray
+    r: jnp.ndarray
+    z_r_mesh: jnp.ndarray
+    bbox: jnp.ndarray
+    h2_nd: Optional[jnp.ndarray] = None
+    h2_N: Optional[jnp.ndarray] = None
+
+def print_base_params(base: BaseDisk) -> None:
+    """Pretty summary of BaseDisk grids and H₂ fields."""
+    print("BaseDisk (grids + baseline H₂ fields):")
+    print(f"  r grid (AU):                  {base.r.shape} "
+          f"[{base.r.min():.2f} → {base.r.max():.2f}]")
+    print(f"  z grid (AU):                  {base.z.shape} "
+          f"[{base.z.min():.2f} → {base.z.max():.2f}]")
+    print("")
+    if base.h2_nd is not None:
+        print(f"  H₂ number density n_H2 (cm^-3): {base.h2_nd.shape}, "
+              f"range {base.h2_nd.min():.2e} → {base.h2_nd.max():.2e}")
+    if base.h2_N is not None:
+        print(f"  H₂ column density N_H2 (cm^-2): {base.h2_N.shape}, "
+              f"range {base.h2_N.min():.2e} → {base.h2_N.max():.2e}")
+    print("")
+    print(f"  Bounding box [cm]:            {base.bbox.tolist()}")
 
 @struct.dataclass
 class DiskParams:
@@ -86,7 +133,7 @@ class DiskParams:
         if not (self.r_max >= self.r_min): raise ValueError("r_max must be ≥ r_min")
         return self
 
-def params_from_yaml(source: Union[str, Path, Dict[str, Any]]) -> DiskParams:
+def disk_from_yaml(source: Union[str, Path, Dict[str, Any]]) -> DiskParams:
     """
     Load DiskParams from the `disk:` section of a YAML (or dict).
 
@@ -119,7 +166,6 @@ def params_from_yaml(source: Union[str, Path, Dict[str, Any]]) -> DiskParams:
     d["resolution"] = int(d["resolution"])
 
     return DiskParams(**d).validate()
-
 
 def params_to_yaml_path(params: DiskParams, path: str | Path) -> None:
     """
@@ -173,7 +219,7 @@ def print_params(params: "DiskParams") -> None:
     Parameters
     ----------
     params : DiskParams
-        Disk parameter object loaded via `params_from_yaml(...)`.
+        Disk parameter object loaded via `disk_from_yaml(...)`.
     """
     print("Disk parameters (parametric broken power law model):")
     print("  Midplane T_norm (K):       {:8.2f}".format(params.T_mid1))
@@ -198,7 +244,90 @@ def print_params(params: "DiskParams") -> None:
     print("  z range (AU):              {:8.2f} → {:8.2f}".format(params.z_min, params.z_max))
     print("  r range (AU):              {:8.2f} → {:8.2f}".format(params.r_min, params.r_max))
 
-    
+def co_disk_from_params(
+    disk_params: "DiskParams",
+    chem_params: "ChemistryParams",
+    *,
+    pressure_correction: bool = True,
+):
+    """
+    Build grids and compute core CO disk params fields from parameter sets.
+
+    Parameters
+    ----------
+    disk_param : DiskParams
+        Parametric disk parameters.
+    chem_params : ChemistryParams
+        Chemistry thresholds and tracer mass.
+    pressure_correction : bool, optional
+        If True, include pressure support in azimuthal velocity.
+
+    Returns
+    -------
+    temperature : jnp.ndarray
+        temperature(z,r) [K], shape (resolution, resolution).
+    velocity : jnp.ndarray
+        v_phi(z,r) [m/s], same shape.
+    co_nd : jnp.ndarray
+        n_CO(z,r) [cm^-3], same shape.
+    prep : PreparedDisk
+        Small container with (z, r) grids and `bbox` in cgs.
+    """
+    # --- grids from disk_params
+    z = jnp.linspace(disk_params.z_min, disk_params.z_max, int(disk_params.resolution))
+    r = jnp.linspace(disk_params.r_min, disk_params.r_max, int(disk_params.resolution))
+    z_mesh, r_mesh = jnp.meshgrid(z, r, indexing="ij")
+
+    # bounding box in cgs (cm)
+    bbox = jnp.array([
+        (au * disk_params.z_min, au * disk_params.z_max),
+        (au * disk_params.r_min, au * disk_params.r_max),
+    ])
+
+    # --- temperature (broken power-law)
+    temperature = temperature_profile(z_mesh, r_mesh, disk_params)
+
+    # --- hydrostatic number density 
+    h2_nd = phys.number_density_profile(
+        z_mesh, r_mesh, temperature,
+        gamma=disk_params.gamma,
+        r_in_au=disk_params.r_in,
+        r_c_au=10.0 ** disk_params.log_r_c,
+        M_gas=disk_params.M_gas,
+        M_star=disk_params.M_star,
+        m_mol_h=m_mol_h,
+    )
+
+    # --- azimuthal velocity
+    v_phi = phys.velocity_profile(
+        z_mesh, r_mesh, h2_nd, temperature,
+        M_star=disk_params.M_star,
+        m_mol_h=m_mol_h,
+        pressure_correction=pressure_correction,
+    )
+
+    # --- column density & CO abundance
+    h2_N = phys.surface_density(z_mesh, h2_nd)  # [cm^-2]
+    Xco  = chem.co_abundance_profile(
+        h2_N, temperature,
+        freezeout=chem_params.freezeout,
+        N_dissoc=chem_params.N_dissoc,
+        N_desorp=chem_params.N_desorp,
+        co_abundance=chem_params.co_abundance,
+    )
+    co_nd = Xco * h2_nd
+
+    base_disk = BaseDisk(
+        z=z,
+        r=r,
+        z_r_mesh=jnp.stack((z_mesh, r_mesh), axis=-1),
+        bbox=bbox,
+        h2_nd=h2_nd,
+        h2_N=h2_N,
+    )
+
+    return temperature, v_phi, co_nd, base_disk
+
 def temperature_profile(z: jnp.ndarray, r: jnp.ndarray, params: DiskParams) -> jnp.ndarray:
     """
     Temperature T(z, r) with piecewise-q radial scaling and mid/atm blending.
@@ -227,3 +356,4 @@ def temperature_profile(z: jnp.ndarray, r: jnp.ndarray, params: DiskParams) -> j
 
 # Pre-jitted temp
 temperature_profile_jit = jax.jit(temperature_profile)
+co_disk_from_params_jit = jax.jit(co_disk_from_params, static_argnames=("pressure_correction",))

@@ -399,21 +399,28 @@ def expand_dims(x: jnp.ndarray, ndim: int, axis: int = 0) -> jnp.ndarray:
     for _ in range(ndim - jnp.asarray(y).ndim):
         y = jnp.expand_dims(y, axis=min(axis, jnp.asarray(y).ndim))
     return y
-    
-def rotate_coords_old(coords, incl, phi, posang):
-    rot_matrix = scipy.spatial.transform.Rotation.from_euler('zxz', [posang, incl, -phi], degrees=True).as_matrix()
-    coords_rot = jnp.rollaxis(jnp.matmul(rot_matrix, jnp.rollaxis(jnp.array(coords), -1, 1)), -1, 1)
-    return coords_rot
 
-def rotate_coords_angles_old(coords, incl, phi):
-    rot_matrix = scipy.spatial.transform.Rotation.from_euler('xz', [incl, phi], degrees=True).as_matrix()
-    coords_rot = jnp.rollaxis(jnp.matmul(rot_matrix, jnp.atleast_3d(jnp.rollaxis(coords, -1, 1))), -1, 1)
-    return coords_rot
-    
-def rotate_coords_vector_old(coords, vector, angle):
-    rot_matrix = scipy.spatial.transform.Rotation.from_rotvec(angle*vector, degrees=True).as_matrix()
-    coords_rot = jnp.rollaxis(jnp.matmul(rot_matrix, jnp.atleast_3d(jnp.rollaxis(coords, -1, 1))), -1, 1)
-    return coords_rot
+def read_spherical_amr(path: str | Path) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    Load a spherical AMR grid from a RADMC-3D-style `amr_grid.inp`.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Path to `amr_grid.inp`.
+
+    Returns
+    -------
+    r, theta, phi : Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
+        1D arrays with bin edges (lengths are nr+1, nth+1, nph+1).
+    """
+    p = Path(path)
+    nr, nth, nph = np.loadtxt(p, skiprows=5, max_rows=1, dtype=int)
+    r = np.loadtxt(p, skiprows=6, max_rows=nr + 1)
+    theta = np.loadtxt(p, skiprows=6 + nr + 1, max_rows=nth + 1)
+    phi = np.loadtxt(p, skiprows=6 + nr + nth + 2, max_rows=nph + 1)
+    return jnp.asarray(r), jnp.asarray(theta), jnp.asarray(phi)
+
 
 __all__ = [
     "read_spherical_amr",

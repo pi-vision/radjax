@@ -10,18 +10,18 @@ name: "HD163296 - Flaherty CO(2-1)"     # dataset + molecule + transition
 # File paths associated with this config
 fits_cube_path: "data/HD163296/Flaherty/HD163296_CO_highres_cen.cm.fits"
 
-
 # -----------------------------
-# Chemistry & line selection (flat keys, not nested)
+# Chemistry & line selection
 # -----------------------------
 chemistry:
-  molecule: CO                                                 # species label
-  line_index: 2                                                # J-upper index for CO(J->J-1), e.g., 3 for CO(2-1)
-  line_name: "CO(2-1)"                                         # descriptive tag
-  co_abundance: 1.0e-4                                         # CO abundance fraction (used by model chemistry)
-  freezeout_K: 19.0                                            # [K] freezeout threshold
-  N_dissoc_cm2: 1.256e21                                       # # [cm^-2] 0.79 * 1.59e21 CO dissociation threshold
-  molecular_table: "data/molecular_tables/molecule_12c16o.inp" # associated molecular table
+  molecule: CO                                                        # species label
+  line_index: 2                                                       # J-upper index for CO(J->J-1), e.g., 3 for CO(2-1)
+  line_name: "CO(2-1)"                                                # descriptive tag
+  co_abundance: 1.0e-4                                                # CO abundance fraction (used by model chemistry)
+  freezeout: 19.0                                                     # [K] freezeout threshold
+  N_dissoc: 1.256e21                                                  # [cm^-2] 0.79 * 1.59e21 CO dissociation threshold
+  N_desorp: null                                                      # optional desorption/reintroduction threshold column [cm^-2]; can be None
+  molecular_table: "data/molecular_tables/molecule_12c16o.inp"  # molecular table. Path is relative to radjax directory
 
 # -----------------------------
 # Observation (ALMA sensor / viewing geometry)

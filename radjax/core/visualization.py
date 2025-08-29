@@ -229,6 +229,10 @@ def slider_frame_comparison(
     frames2: np.ndarray,
     axis: int = 0,
     scale: str = "amp",
+    title1: str | None = None,
+    title2: str | None = None,
+    cmap12: str = "inferno",
+    cmap_diff: str = "RdBu_r",
 ):
     """
     Interactive slider to compare two 3D stacks frame-by-frame.
@@ -242,6 +246,14 @@ def slider_frame_comparison(
     scale : {'amp','log'}
         - 'amp': show absolute difference in panel 3,
         - 'log': show log(|frames1/frames2|) in panel 3.
+    title1 : str or None
+        Optional title for the first subplot (frames1).
+    title2 : str or None
+        Optional title for the second subplot (frames2).
+    cmap12 : str
+        Colormap for the first two panels (default: "inferno").
+    cmap_diff : str
+        Colormap for the difference panel (default: "RdBu_r").
 
     Returns
     -------
@@ -263,17 +275,22 @@ def slider_frame_comparison(
     fig, axes = plt.subplots(1, 3, figsize=(9, 3))
     plt.tight_layout()
 
-    # Initial means for colorbar footprints
     mean_images = [
         frames1.mean(axis=axis),
         frames2.mean(axis=axis),
         np.abs(frames1 - frames2).mean(axis=axis),
     ]
     cbars = []
-    titles = [None, None, "Absolute difference" if scale == "amp" else "Log relative difference"]
+    titles = [
+        title1,
+        title2,
+        "Absolute difference" if scale == "amp" else "Log relative difference",
+    ]
+    cmaps = [cmap12, cmap12, cmap_diff]
 
-    for ax, image in zip(axes, mean_images):
-        im = ax.imshow(image, origin="lower")
+    for ax, image, title, cmap in zip(axes, mean_images, titles, cmaps):
+        im = ax.imshow(image, origin="lower", cmap=cmap)
+        ax.set_title(title)
         ax.set_xticks([])
         ax.set_yticks([])
         divider = make_axes_locatable(ax)
@@ -291,14 +308,16 @@ def slider_frame_comparison(
         else:
             raise ValueError("scale must be 'amp' or 'log'")
 
-        for ax, img, title, cbar in zip(axes, [img1, img2, img3], titles, cbars):
-            ax.imshow(img, origin="lower")
+        for ax, img, title, cbar, cmap in zip(axes, [img1, img2, img3], titles, cbars, cmaps):
+            ax.imshow(img, origin="lower", cmap=cmap)
             ax.set_title(title)
             cbar.mappable.set_clim([float(np.nanmin(img)), float(np.nanmax(img))])
 
     num_frames = min(frames1.shape[axis], frames2.shape[axis])
     plt.tight_layout()
     interact(imshow_frame, frame=(0, num_frames - 1))
+
+
 
 
 # ----------------------------------------------------------------------------- #
@@ -434,14 +453,13 @@ def animate_movies_synced(
 # ----------------------------------------------------------------------------- #
 # Domain-specific plot
 # ----------------------------------------------------------------------------- #
-def plot_disk_profile(
+def plot_disk_profile_rz(
     ax: plt.Axes,
     r_disk: np.ndarray,
     z_disk: np.ndarray,
-    temperature: np.ndarray,
     nd_h2: np.ndarray,
-    abundance_co: np.ndarray,
-    co_abundance: float,
+    temperature: np.ndarray,
+    co_nd: np.ndarray,
     temp_levels: Sequence[float] = (20, 40, 60, 80, 100, 120),
     vmin: float = 3,
     vmax: float = 10,
@@ -455,14 +473,12 @@ def plot_disk_profile(
         Target axes.
     r_disk, z_disk : np.ndarray
         2D coordinate meshes aligned with `nd_h2`/`temperature`.
-    temperature : np.ndarray
-        2D temperature field (K).
     nd_h2 : np.ndarray
         2D number density of H2.
-    abundance_co : np.ndarray
-        2D CO abundance field.
-    co_abundance : float
-        CO abundance level to contour (e.g., mid-plane abundance).
+    temperature : np.ndarray
+        2D temperature field (K).
+    co_nd : np.ndarray
+        2D CO number density field.
     temp_levels : sequence of float
         Temperature contour levels (K).
     vmin, vmax : float
@@ -490,8 +506,8 @@ def plot_disk_profile(
     cpT = ax.contour(r_disk, z_disk, temperature, temp_levels, colors="white", linewidths=0.8)
     ax.clabel(cpT, temp_levels, inline=1, fontsize=10)
 
-    cpCO = ax.contour(r_disk, z_disk, abundance_co, levels=[co_abundance / 2.0], colors="black", linewidths=0.8)
-    ax.clabel(cpCO, levels=[co_abundance / 2.0], fmt="CO", inline=1, fontsize=10)
+    cpCO = ax.contour(r_disk, z_disk, co_nd, levels=[co_nd[co_nd>0].min()], colors="black", linewidths=0.8)
+    ax.clabel(cpCO, levels=[co_nd[co_nd>0].min()], fmt="CO", inline=1, fontsize=10)
 
     ax.set_title("Disk profile: density and temperature", fontsize=13)
     ax.set_xlabel("r [au]")
