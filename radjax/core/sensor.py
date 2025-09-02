@@ -485,7 +485,6 @@ def render_cube(
     cube : (nfreq, ny, nx) jnp.ndarray
         Spectral cube (NaNs sanitized).
     """
-
     from radjax.core.parallel import shard_with_padding
 
     # LTE level populations
@@ -514,7 +513,7 @@ def render_cube(
         mol.a_ud, mol.b_ud, mol.b_du,
         rays.coords_xyz, rays.obs_dir, nu0, rays.pixel_area
     )
-    images = np.nan_to_num(images).reshape(-1, rays.ny, rays.nx)[:freqs.size]
+    images = jnp.clip(jnp.nan_to_num(images).reshape(-1, rays.ny, rays.nx)[:freqs.size], 0.0)
     
     return images
 

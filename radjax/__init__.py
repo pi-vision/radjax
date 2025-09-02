@@ -10,6 +10,7 @@ from .core import alma_io
 from .core import visualization
 from .core import parallel
 from .core import utils
+from .core import inference
 from .models import broken_power_law
 
 __version__ = "0.1.0"

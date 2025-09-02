@@ -127,16 +127,16 @@ def load_molecular_tables(chem_params: "ChemistryParams") -> MolecularData:
     nu0, a_ud, b_ud, b_du = einstein_coefficients(
         energy_levels, radiative_transitions, transition=chem_params.line_index
     )
-
+    
     # Wrap in MolecularData
     return MolecularData(
         nu0=nu0, 
         transition=chem_params.line_index,
-        energy_levels=energy_levels,
-        radiative_transitions=radiative_transitions,
-        a_ud=a_ud,
-        b_ud=b_ud,
-        b_du=b_du,
+        energy_levels=jnp.asarray(energy_levels),
+        radiative_transitions=jnp.asarray(radiative_transitions),
+        a_ud=jnp.asarray(a_ud),
+        b_ud=jnp.asarray(b_ud),
+        b_du=jnp.asarray(b_du),
     )
 
 def einstein_coefficients(
@@ -326,6 +326,8 @@ def chemistry_from_yaml_path(path: str | Path) -> ChemistryParams:
 
 def chemistry_to_yaml_path(params: ChemistryParams, path: str | Path) -> None:
     p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+
     doc: Dict[str, Any] = {}
     if p.exists():
         with open(p, "r") as f:

@@ -24,6 +24,7 @@ import yaml
 # local constants
 from ..core.consts import M_sun, au, m_mol_h
 from ..core import phys
+from ..core import sensor
 from ..core import chemistry as chem
 
 @struct.dataclass
@@ -170,12 +171,15 @@ def disk_from_yaml(source: Union[str, Path, Dict[str, Any]]) -> DiskParams:
 def params_to_yaml_path(params: DiskParams, path: str | Path) -> None:
     """
     Write back only the `disk:` block, preserving other YAML sections.
+    If the YAML file does not exist, it will be created.
 
     Reverse conversions:
       M_star, M_gas: grams → [M_sun]
       v_turb:        m/s   → [km/s]
     """
     p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+
     doc: Dict[str, Any] = {}
     if p.exists():
         with open(p, "r") as f:
@@ -183,30 +187,35 @@ def params_to_yaml_path(params: DiskParams, path: str | Path) -> None:
 
     disk_out = {
         # thermal
-        "T_mid1": params.T_mid1,
-        "T_atm1": params.T_atm1,
-        "q": params.q,
-        "q_in": params.q_in,
-        "r_break": params.r_break,
-        "log_r_c": params.log_r_c,
-        "gamma": params.gamma,
+        "T_mid1": float(params.T_mid1),
+        "T_atm1": float(params.T_atm1),
+        "q": float(params.q),
+        "q_in": float(params.q_in),
+        "r_break": float(params.r_break),
+        "log_r_c": float(params.log_r_c),
+        "gamma": float(params.gamma),
+    
         # mass content (back to M_sun)
-        "M_star": params.M_star / M_sun,
-        "M_gas": params.M_gas / M_sun,
+        "M_star": float(params.M_star / M_sun),
+        "M_gas": float(params.M_gas / M_sun),
+    
         # geometry / scaling
-        "r_in": params.r_in,
-        "r_scale": params.r_scale,
-        "z_q0": params.z_q0,
-        "delta": params.delta,
+        "r_in": float(params.r_in),
+        "r_scale": float(params.r_scale),
+        "z_q0": float(params.z_q0),
+        "delta": float(params.delta),
+    
         # kinematics
-        "v_turb": params.v_turb / 1.0e3,
+        "v_turb": float(params.v_turb / 1.0e3),  # [km/s]
+    
         # model grid
         "resolution": int(params.resolution),
-        "z_min": params.z_min,
-        "z_max": params.z_max,
-        "r_min": params.r_min,
-        "r_max": params.r_max,
+        "z_min": float(params.z_min),
+        "z_max": float(params.z_max),
+        "r_min": float(params.r_min),
+        "r_max": float(params.r_max),
     }
+
 
     doc["disk"] = disk_out
     with open(p, "w") as f:
@@ -270,7 +279,7 @@ def co_disk_from_params(
         v_phi(z,r) [m/s], same shape.
     co_nd : jnp.ndarray
         n_CO(z,r) [cm^-3], same shape.
-    prep : PreparedDisk
+    base_disk : PreparedDisk
         Small container with (z, r) grids and `bbox` in cgs.
     """
     # --- grids from disk_params
@@ -354,6 +363,100 @@ def temperature_profile(z: jnp.ndarray, r: jnp.ndarray, params: DiskParams) -> j
         T_atm,
     )
 
-# Pre-jitted temp
+def forward_model(    
+    *,
+    disk_params: DiskParams, 
+    freqs: jnp.ndarray,           # (F,)
+    state: SamplerState,
+    output: Literal["image","vis"] = "image",
+    backend: Literal["vmap","pmap","none"] = "vmap",
+):
+    """
+    Forward-model a spectral cube from disk parameters. If a 2D beam kernel is present
+    at `state.beam.kernel`, convolve each channel; otherwise return the raw images.
+    Visibility sampling is a placeholder.
+
+    Parameters
+    ----------
+    disk_params : DiskParams
+        Current disk parameter set (updated from θ via adapter).
+    freqs : (F,) jnp.ndarray
+        Frequency grid [Hz] at which to compute the cube.
+    state : SamplerState
+        Immutable context (rays, molecule, chemistry, etc.). May include an optional
+        2D beam kernel at `state.beam.kernel` with shape (ny, nx).
+    output : {"image", "vis"}, default="image"
+        "image": return (optionally beam-convolved) image cube.
+        "vis":   not implemented yet (raises).
+    backend : {"vmap","pmap","none"}, default="vmap"
+        Compute backend for the radiative transfer solver.
+
+    Returns
+    -------
+    jnp.ndarray
+        If output="image": (F, ny, nx) spectral cube (beam-convolved if beam exists).
+        If output="vis": raises NotImplementedError.
+
+    Raises
+    ------
+    NotImplementedError
+        If `output="vis"`.
+    ValueError
+        If `output` is not one of {"image","vis"}.
+    """
+    # 1) Disk fields on (z,r) grid
+    temperature, v_phi, co_nd, base_disk = co_disk_from_params(
+        disk_params=disk_params,
+        chem_params=state.chem_params,
+        pressure_correction=getattr(state, "use_pressure_correction", True),
+    )
+
+    # 2) Sample fields along rays
+    nd_ray, temperature_ray, velocity_ray = sensor.sample_symmetric_disk__along_rays(
+        rays=state.rays,
+        bbox=base_disk.bbox,
+        co_nd=co_nd,
+        temperature=temperature,
+        v_phi=v_phi,
+    )
+
+    # 3) Radiative transfer -> raw cube
+    images = sensor.render_cube(
+        rays=state.rays,
+        nd_ray=nd_ray,
+        temperature_ray=temperature_ray,
+        velocity_ray=velocity_ray,
+        nu0=state.mol.nu0,
+        freqs=freqs,
+        v_turb=disk_params.v_turb,
+        mol=state.mol,
+        backend=backend,
+    )
+
+    # 4) Post-processing
+    if output == "image":
+        beam_kernel = getattr(getattr(state, "beam", None), "kernel", None)
+        return sensor.fftconvolve_vmap(images, beam_kernel) if beam_kernel is not None else images
+
+    if output == "vis":
+        raise NotImplementedError(
+            "Visibility sampling not implemented yet. "
+            "Planned: per-channel FFT to UV grid + (u,v) sampling from measured baselines."
+        )
+
+    raise ValueError("output must be 'image' or 'vis'")
+    
+
+# Pre-jitted functions
 temperature_profile_jit = jax.jit(temperature_profile)
 co_disk_from_params_jit = jax.jit(co_disk_from_params, static_argnames=("pressure_correction",))
+forward_model_jit = jax.jit(
+    lambda disk_params, freqs, state: forward_model(
+        disk_params=disk_params,
+        freqs=freqs,
+        state=state,
+        output="image",     # baked in
+        backend="vmap",     # baked in
+    ),
+    static_argnames=(),  # nothing dynamic except the baked-in flags
+)
