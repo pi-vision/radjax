@@ -117,5 +117,76 @@ def prepare_alma_cube(
         beam_kernel=beam_kernel,
     )
 
+def subsample_cube_uniform(
+    alma_cube: PreparedALMACube,
+    num_freqs_subsample: int,
+) -> PreparedALMACube:
+    """
+    Uniformly subsample frequencies from an ALMA cube.
+
+    Parameters
+    ----------
+    alma_cube : PreparedALMACube
+        The prepared ALMA cube.
+    num_subsample : int
+        Number of frequencies to subsample.
+
+    Returns
+    -------
+    PreparedALMACube
+        New ALMA cube with subsampled frequencies.
+    """
+    if num_freqs_subsample >= alma_cube.num_freqs:
+        return alma_cube
+
+    indices = np.linspace(0, alma_cube.num_freqs - 1, num_freqs_subsample, dtype=int)
+
+    data = alma_cube.data[indices]          # (nchan, ny, nx)
+    velocities = alma_cube.velocities[indices]
+    freqs = alma_cube.freqs[indices]
+    
+    width_kms = (float(velocities[-1]) - float(velocities[0])) / 1000.0
+    delta_v_ms = float(velocities[1] - velocities[0])
+
+    return PreparedALMACube(
+        cube=alma_cube.cube,
+        data=data,
+        velocities=velocities,
+        freqs=freqs,
+        nu0=alma_cube.nu0,
+        num_freqs=num_freqs_subsample,
+        delta_v_ms=delta_v_ms,
+        width_kms=width_kms,
+        npix=alma_cube.npix,
+        x_sky=alma_cube.x_sky,
+        y_sky=alma_cube.y_sky,
+        beam_kernel=alma_cube.beam_kernel,
+    )
+
+
+def subsample_freqs_uniform(
+    alma_cube: PreparedALMACube,
+    num_subsample: int,
+) -> ArrayLike:
+    """
+    Uniformly subsample frequencies from an ALMA cube.
+
+    Parameters
+    ----------
+    alma_cube : PreparedALMACube
+        The prepared ALMA cube.
+    num_subsample : int
+        Number of frequencies to subsample.
+
+    Returns
+    -------
+    ArrayLike
+        Subsampled frequencies (Hz).
+    """
+    if num_subsample >= alma_cube.num_freqs:
+        return alma_cube.freqs
+
+    indices = np.linspace(0, alma_cube.num_freqs - 1, num_subsample, dtype=int)
+    return alma_cube.freqs[indices]
 
 __all__ = ["PreparedALMACube", "prepare_alma_cube"]
