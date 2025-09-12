@@ -233,12 +233,43 @@ def rays_alma_projection(
     
     return rays
 
+def rays_simulation_projection(
+    x_sky: "ArrayLike",          # [cm], shape (ny, nx)
+    y_sky: "ArrayLike",          # [cm], shape (ny, nx)
+    distance: float,             # [pc]
+    nray: int,
+    incl: float,                 # [deg]
+    phi: float,                  # [deg]
+    posang: float,               # [deg], roll about LOS
+    z_width: float,              # [au]
+    fov_cm: float,               # [cm], total field of view on a side
+) -> "RayBundle":
+    pass
+
+# TODO: rename to rays_from_alma_params since we might not use rays_alma_projection. Or otherwise remove alma from rays_alma_projection
 def rays_from_params(
     obs_params: ObservationParams, 
     x_sky: ArrayLike, 
     y_sky: ArrayLike
 ):
     return rays_alma_projection_jit(
+        jnp.asarray(x_sky),
+        jnp.asarray(y_sky),
+        float(obs_params.distance),
+        int(obs_params.nray),
+        float(obs_params.incl),
+        float(obs_params.phi),
+        float(obs_params.posang),
+        float(obs_params.z_width),
+        float(obs_params.fov),
+    )
+
+def rays_from_simulation_params(
+    obs_params: SimulationParams, 
+    x_sky: ArrayLike, 
+    y_sky: ArrayLike
+):
+    return rays_simulation_projection_jit(
         jnp.asarray(x_sky),
         jnp.asarray(y_sky),
         float(obs_params.distance),
@@ -531,6 +562,7 @@ def project_volume(volume: jnp.ndarray, coords: jnp.ndarray, bbox: jnp.ndarray) 
     projection = jnp.sum(mid * ds, axis=-1)
     return projection
 
+# TODO: fix double underscore (...disk__along...)
 def sample_symmetric_disk__along_rays(
     rays: "RayBundle",
     bbox: jnp.ndarray,                  # shape (2,2): [[zmin,zmax],[rmin,rmax]] in cm
