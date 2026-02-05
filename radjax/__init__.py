@@ -45,6 +45,7 @@ except ImportError:
     pass  # requires radjax[vis]: pip install radjax[vis]
 
 from .models import broken_power_law
+from .core import dust
 
 __version__ = "0.1.0"
 
@@ -54,19 +55,9 @@ __all__ = [
     "line_rte",
     "grid",
     "sensor",
-    "visibilities",
-    "alma_io",
-    "casa_io",
-    "vis_forward_model",
-    "consts",
-    "phys",
-    "chemistry",
-    "inference",
-    "parallel",
-    "utils",
-    "visualization",
-    "network",
-
-    # Models
-    "broken_power_law",
+    "parametric_disk",
+    "visualization", 
+    "io", 
+    "alma_io", 
+    "dust"
 ]

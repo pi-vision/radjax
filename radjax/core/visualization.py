@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 from matplotlib import animation
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from .consts import au
+import matplotlib.colors as mcolors
 
 # ----------------------------------------------------------------------------- #
 # Utilities
@@ -442,20 +443,33 @@ def slider_frame_comparison(
         title2,
         "Absolute difference" if scale == "amp" else "Log relative difference",
     ]
+
+    mindiff = np.min(mean_images[2])
+    maxdiff = np.max(mean_images[2])
+    if mindiff < 0:
+        diffnorm = mcolors.TwoSlopeNorm(vcenter=0, vmin=mindiff, vmax=maxdiff)
+    else: 
+        diffnorm = None
+        cmap_diff = 'Reds'
+    norms = [None, None, diffnorm]
     cmaps = [cmap12, cmap12, cmap_diff]
 
-    for ax, image, title, cmap in zip(axes, mean_images, titles, cmaps):
-        im = ax.imshow(image, origin="lower", cmap=cmap)
+    ims = []
+
+    for ax, image, title, cmap, norm in zip(axes, mean_images, titles, cmaps, norms):
+        im = ax.imshow(image, origin="lower", cmap=cmap, norm=norm)
         ax.set_title(title)
         ax.set_xticks([])
         ax.set_yticks([])
         divider = make_axes_locatable(ax)
         cax = divider.append_axes("right", size="5%", pad=0.05)
         cbars.append(fig.colorbar(im, cax=cax))
+        ims.append(im)
 
     def imshow_frame(frame: int):
         img1 = np.take(frames1, frame, axis=axis)
         img2 = np.take(frames2, frame, axis=axis)
+
         if scale == "amp":
             img3 = np.abs(img1 - img2)
         elif scale == "log":
@@ -464,10 +478,13 @@ def slider_frame_comparison(
         else:
             raise ValueError("scale must be 'amp' or 'log'")
 
-        for ax, img, title, cbar, cmap in zip(axes, [img1, img2, img3], titles, cbars, cmaps):
-            ax.imshow(img, origin="lower", cmap=cmap)
-            ax.set_title(title)
-            cbar.mappable.set_clim([float(np.nanmin(img)), float(np.nanmax(img))])
+        for im, img, cbar, norm in zip(ims, [img1, img2, img3], cbars, norms):
+            im.set_data(img)
+            if norm is not None:
+                im.set_norm(norm)
+                cbar.update_normal(im)
+
+        fig.canvas.draw_idle()
 
     num_frames = min(frames1.shape[axis], frames2.shape[axis])
     plt.tight_layout()
@@ -825,7 +842,7 @@ def plot_disk_profile_rz(
     im = ax.imshow(
         np.log10(nd_h2),
         origin="lower",
-        cmap="turbo",
+        cmap="viridis",
         extent=[float(r_disk.min()), float(r_disk.max()), float(z_disk.min()), float(z_disk.max())],
         vmin=vmin,
         vmax=vmax,
