@@ -24,6 +24,7 @@ import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
 import numpy as np
+import matplotlib.pyplot as plt
 
 from . import grid, phys
 from . import chemistry as chem
@@ -547,6 +548,250 @@ def render_cube(
     images = jnp.clip(jnp.nan_to_num(images).reshape(-1, rays.ny, rays.nx)[:freqs.size], 0.0)
     
     return images
+
+
+def render_cube_with_dust(
+    rays: "RayBundle",
+    nd_ray: jnp.ndarray,           # (H, W, N)
+    temperature_ray: jnp.ndarray,  # (H, W, N)
+    velocity_ray: jnp.ndarray,     # (H, W, N, 3)
+    *,
+    nu0: float,
+    freqs: jnp.ndarray,            # (F,) [Hz]
+    v_turb: float,
+    mol: "MolecularData",
+    backend: str = "vmap",         # {"vmap", "pmap", "none"}
+    dust_alpha: jnp.ndarray,    # (H, W, N)
+    dust_temp_profile: jnp.ndarray,  # (H, W, N)
+) -> jnp.ndarray:
+    """
+    Render I(ν, y, x) using pre-sampled ray fields and line data in `mol`.
+
+    Parameters
+    ----------
+    rays : RayBundle
+        nx, ny, coords_xyz, pixel_area, obs_dir describing ray geometry.
+    nd_ray : (H, W, N)
+        Number density along rays.
+    temperature_ray : (H, W, N)
+        Temperature along rays [K].
+    velocity_ray : (H, W, N, 3)
+        3D velocity vectors along rays.
+    nu0: float, 
+        Central frequency, e.g. from alma_cube.nu0
+    freqs : (F,)
+        Frequency channels [Hz].
+    v_turb : float
+        Microturbulent velocity (ensure units consistent with opacity kernel).
+    mol : MolecularData
+        Energy levels, transitions, and Einstein coefficients for one line.
+    backend : {"vmap", "pmap", "none"}, default="vmap"
+        Which compute backend to use for the spectral cube solver:
+          - "vmap" : run vectorized over frequency (default, usually fastest single-device)
+          - "pmap" : parallelize across multiple devices (if available)
+          - "none" : plain per-frequency loop (slow, but simplest)
+
+    Returns
+    -------
+    cube : (nfreq, ny, nx) jnp.ndarray
+        Spectral cube (NaNs sanitized).
+    """
+    from radjax.core.parallel import shard_with_padding
+
+    # LTE level populations
+    n_up, n_dn = chem.n_up_down(
+        nd_ray, temperature_ray,
+        mol.energy_levels, mol.radiative_transitions,
+        transition=mol.transition,
+    )
+
+    # Line opacity
+    alpha_tot = line_rte.alpha_total(v_turb, temperature_ray)
+
+    # Choose backend
+    if backend == "pmap":
+        compute_fn = line_rte.compute_spectral_cube_dust_pmap
+        freqs = shard_with_padding(freqs)  # (ndev, F_per_dev)
+    elif backend == "vmap":
+        compute_fn = line_rte.compute_spectral_cube_dust_vmap
+    elif backend == "none":
+        compute_fn = line_rte.compute_spectral_cube_with_dust
+    else:
+        raise ValueError(f"Unknown backend={backend!r}. Must be 'vmap', 'pmap', or 'none'.")
+    
+
+    freq_diff = freqs[1] - freqs[0]
+    distant_freq = freqs[0] - 50*freq_diff 
+    eval_freqs = jnp.concatenate([jnp.array([distant_freq]), freqs])
+
+    images = compute_fn(
+        eval_freqs, velocity_ray, alpha_tot, n_up, n_dn,
+        mol.a_ud, mol.b_ud, mol.b_du,
+        rays.coords_xyz, rays.obs_dir, nu0, rays.pixel_area, dust_alpha, dust_temp_profile
+    )
+
+    images = jnp.clip(jnp.nan_to_num(images).reshape(-1, rays.ny, rays.nx)[:eval_freqs.size], 0.0)
+
+    plt.figure()
+    plt.imshow(images[0, ...])
+    plt.show()
+    
+    # images = images[1: ,: , :] - images[0, :, :]  # subtrack to make contsub
+
+    return images
+
+
+
+def render_tau1_cube(
+    rays: "RayBundle",
+    nd_ray: jnp.ndarray,           # (H, W, N)
+    temperature_ray: jnp.ndarray,  # (H, W, N)
+    velocity_ray: jnp.ndarray,     # (H, W, N, 3)
+    *,
+    nu0: float,
+    freqs: jnp.ndarray,            # (F,) [Hz]
+    v_turb: float,
+    mol: "MolecularData",
+    backend: str = "vmap",         # {"vmap", "pmap", "none"}
+) -> jnp.ndarray:
+    """
+    Render Tau=1 surface using pre-sampled ray fields and line data in `mol`.
+
+    Parameters
+    ----------
+    rays : RayBundle
+        nx, ny, coords_xyz, pixel_area, obs_dir describing ray geometry.
+    nd_ray : (H, W, N)
+        Number density along rays.
+    temperature_ray : (H, W, N)
+        Temperature along rays [K].
+    velocity_ray : (H, W, N, 3)
+        3D velocity vectors along rays.
+    nu0: float, 
+        Central frequency, e.g. from alma_cube.nu0
+    freqs : (F,)
+        Frequency channels [Hz].
+    v_turb : float
+        Microturbulent velocity (ensure units consistent with opacity kernel).
+    mol : MolecularData
+        Energy levels, transitions, and Einstein coefficients for one line.
+    backend : {"vmap", "pmap", "none"}, default="vmap"
+        Which compute backend to use for the spectral cube solver:
+          - "vmap" : run vectorized over frequency (default, usually fastest single-device)
+          - "pmap" : parallelize across multiple devices (if available)
+          - "none" : plain per-frequency loop (slow, but simplest)
+
+    Returns
+    -------
+    cube : (nfreq, ny, nx) jnp.ndarray
+        Cube with z coordinate of Tau=1 surface (NaNs sanitized).
+    """
+    from radjax.core.parallel import shard_with_padding
+
+    # LTE level populations
+    n_up, n_dn = chem.n_up_down(
+        nd_ray, temperature_ray,
+        mol.energy_levels, mol.radiative_transitions,
+        transition=mol.transition,
+    )
+
+    # Line opacity
+    alpha_tot = line_rte.alpha_total(v_turb, temperature_ray)
+
+    # Choose backend
+    if backend == "pmap":
+        compute_fn = line_rte.compute_tau1_cube_pmap
+        freqs = shard_with_padding(freqs)  # (ndev, F_per_dev)
+    elif backend == "vmap":
+        compute_fn = line_rte.compute_tau1_cube_vmap
+    elif backend == "none":
+        compute_fn = line_rte.compute_tau1_cube
+    else:
+        raise ValueError(f"Unknown backend={backend!r}. Must be 'vmap', 'pmap', or 'none'.")
+    
+    images = compute_fn(
+        freqs, velocity_ray, alpha_tot, n_up, n_dn,
+        mol.b_ud, mol.b_du,
+        rays.coords_xyz, rays.obs_dir, nu0
+    )
+    
+    return images
+
+
+def render_emission_height_cube(
+    rays: "RayBundle",
+    nd_ray: jnp.ndarray,           # (H, W, N)
+    temperature_ray: jnp.ndarray,  # (H, W, N)
+    velocity_ray: jnp.ndarray,     # (H, W, N, 3)
+    *,
+    nu0: float,
+    freqs: jnp.ndarray,            # (F,) [Hz]
+    v_turb: float,
+    mol: "MolecularData",
+    backend: str = "vmap",         # {"vmap", "pmap", "none"}
+    cutoff_intensity: float = 1e-14
+) -> jnp.ndarray:
+    """
+    Render Tau=1 surface using pre-sampled ray fields and line data in `mol`.
+
+    Parameters
+    ----------
+    rays : RayBundle
+        nx, ny, coords_xyz, pixel_area, obs_dir describing ray geometry.
+    nd_ray : (H, W, N)
+        Number density along rays.
+    temperature_ray : (H, W, N)
+        Temperature along rays [K].
+    velocity_ray : (H, W, N, 3)
+        3D velocity vectors along rays.
+    nu0: float, 
+        Central frequency, e.g. from alma_cube.nu0
+    freqs : (F,)
+        Frequency channels [Hz].
+    v_turb : float
+        Microturbulent velocity (ensure units consistent with opacity kernel).
+    mol : MolecularData
+        Energy levels, transitions, and Einstein coefficients for one line.
+    backend : {"vmap", "pmap", "none"}, default="vmap"
+        Which compute backend to use for the spectral cube solver:
+          - "vmap" : run vectorized over frequency (default, usually fastest single-device)
+          - "pmap" : parallelize across multiple devices (if available)
+          - "none" : plain per-frequency loop (slow, but simplest)
+
+    Returns
+    -------
+    cube : (nfreq, ny, nx) jnp.ndarray
+        Cube with z coordinate of Tau=1 surface (NaNs sanitized).
+    """
+    from radjax.core.parallel import shard_with_padding
+
+    # LTE level populations
+    n_up, n_dn = chem.n_up_down(
+        nd_ray, temperature_ray,
+        mol.energy_levels, mol.radiative_transitions,
+        transition=mol.transition,
+    )
+    # Line opacity
+    alpha_tot = line_rte.alpha_total(v_turb, temperature_ray)
+
+    # Choose backend
+    if backend == "pmap":
+        compute_fn = line_rte.compute_emission_height_cube_pmap
+        freqs = shard_with_padding(freqs)  # (ndev, F_per_dev)
+    elif backend == "vmap":
+        compute_fn = line_rte.compute_emission_height_cube_vmap
+    elif backend == "none":
+        compute_fn = line_rte.compute_emission_height_cube
+    else:
+        raise ValueError(f"Unknown backend={backend!r}. Must be 'vmap', 'pmap', or 'none'.")
+    
+    z_cube = compute_fn(
+        freqs, velocity_ray, alpha_tot, n_up, n_dn,
+        mol.a_ud, mol.b_ud, mol.b_du,
+        rays.coords_xyz, rays.obs_dir, nu0, cutoff=cutoff_intensity
+    )[0]
+
+    return z_cube
 
 
 

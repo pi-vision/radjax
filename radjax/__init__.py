@@ -12,6 +12,7 @@ from .core import parallel
 from .core import utils
 from .core import inference
 from .models import broken_power_law
+from .core import dust
 
 __version__ = "0.1.0"
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "visualization", 
     "io", 
     "alma_io", 
+    "dust"
 ]
 
 

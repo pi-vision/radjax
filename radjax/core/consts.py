@@ -26,3 +26,4 @@ m_co = molecular_weight_co * mp
 m_h = molecular_weight_h * mp
 mu = 2.34                         # mean molecular weight of the gas
 m_mol_h = mu * m_h
+L_sun = 3.828e33                  # solar luminosity in erg/s
