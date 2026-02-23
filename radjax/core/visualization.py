@@ -393,29 +393,6 @@ def slider_frame_comparison(
 ):
     """
     Interactive slider to compare two 3D stacks frame-by-frame.
-
-    Parameters
-    ----------
-    frames1, frames2 : np.ndarray
-        3D arrays with a matching size along `axis`.
-    axis : int
-        Frame axis.
-    scale : {'amp','log'}
-        - 'amp': show absolute difference in panel 3,
-        - 'log': show log(|frames1/frames2|) in panel 3.
-    title1 : str or None
-        Optional title for the first subplot (frames1).
-    title2 : str or None
-        Optional title for the second subplot (frames2).
-    cmap12 : str
-        Colormap for the first two panels (default: "inferno").
-    cmap_diff : str
-        Colormap for the difference panel (default: "RdBu_r").
-
-    Returns
-    -------
-    None
-        (Displays interactive widgets in Jupyter.)
     """
     try:
         from ipywidgets import interact
@@ -429,32 +406,40 @@ def slider_frame_comparison(
     if frames1.shape[axis] != frames2.shape[axis]:
         raise ValueError("Frame dimension sizes must match for comparison.")
 
+    # 1. Precalculate the difference stack to establish global min/max limits
+    if scale == "amp":
+        diff_stack = frames1 - frames2
+        title3 = "Difference"
+    elif scale == "log":
+        eps = 1e-20
+        diff_stack = np.log(np.abs((frames1 + eps) / (frames2 + eps)))
+        title3 = "Log relative difference"
+    else:
+        raise ValueError("scale must be 'amp' or 'log'")
+
     fig, axes = plt.subplots(1, 3, figsize=(9, 3))
     plt.tight_layout()
 
     mean_images = [
         frames1.mean(axis=axis),
         frames2.mean(axis=axis),
-        np.abs(frames1 - frames2).mean(axis=axis),
+        diff_stack.mean(axis=axis), # Removed the np.abs() to preserve negative values
     ]
-    cbars = []
-    titles = [
-        title1,
-        title2,
-        "Absolute difference" if scale == "amp" else "Log relative difference",
-    ]
+    
+    titles = [title1, title2, title3]
 
-    mindiff = np.min(mean_images[2])
-    maxdiff = np.max(mean_images[2])
-    if mindiff < 0:
-        diffnorm = mcolors.TwoSlopeNorm(vcenter=0, vmin=mindiff, vmax=maxdiff)
-    else: 
-        diffnorm = None
-        cmap_diff = 'Reds'
+    # 2. Create a perfectly symmetric fixed norm for the difference panel
+    max_diff = np.max(np.abs(diff_stack))
+    if max_diff == 0:
+        max_diff = 1e-6 # Prevents singular norm errors if frames are identical
+        
+    diffnorm = mcolors.Normalize(vmin=-max_diff, vmax=max_diff)
+
     norms = [None, None, diffnorm]
     cmaps = [cmap12, cmap12, cmap_diff]
 
     ims = []
+    cbars = []
 
     for ax, image, title, cmap, norm in zip(axes, mean_images, titles, cmaps, norms):
         im = ax.imshow(image, origin="lower", cmap=cmap, norm=norm)
@@ -469,19 +454,15 @@ def slider_frame_comparison(
     def imshow_frame(frame: int):
         img1 = np.take(frames1, frame, axis=axis)
         img2 = np.take(frames2, frame, axis=axis)
+        img3 = np.take(diff_stack, frame, axis=axis)
 
-        if scale == "amp":
-            img3 = np.abs(img1 - img2)
-        elif scale == "log":
-            eps = 1e-20
-            img3 = np.log(np.abs((img1 + eps) / (img2 + eps)))
-        else:
-            raise ValueError("scale must be 'amp' or 'log'")
-
+        # 3. Update data cleanly without shadowing local variables
         for im, img, cbar, norm in zip(ims, [img1, img2, img3], cbars, norms):
             im.set_data(img)
-            if norm is not None:
-                im.set_norm(norm)
+
+            # Only autoscale panels 1 and 2 (since their norm is None)
+            if norm is None:
+                im.autoscale()          
                 cbar.update_normal(im)
 
         fig.canvas.draw_idle()

@@ -70,18 +70,18 @@ def create_3d_dust_ring(
     radius: float,
     width: float,
     thickness: float,
-    peak_extinction: float,
+    peak_density: float,      # peak dust mass density [g/cm³]
     inclination: float,   # degrees
     pa: float,            # degrees
     center: jnp.ndarray = jnp.array([0.0, 0.0, 0.0]),
 ):
-    
+
     r_disk, z_disk, _ = ray_coords_to_disk(ray_coords, incl=inclination, pa=pa, center=center)
 
     radial_part = jnp.exp(-0.5 * ((r_disk - radius) / (0.5 * width))**2)
     vertical_part = jnp.exp(-0.5 * (z_disk / (0.5 * thickness))**2)
 
-    density = peak_extinction * radial_part * vertical_part
+    density = peak_density * radial_part * vertical_part
 
     return density
 

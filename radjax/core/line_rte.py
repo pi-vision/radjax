@@ -26,6 +26,9 @@ from .consts import (
 )
 
 
+
+
+
 def compute_spectral_cube(
     camera_freqs: jnp.ndarray,
     gas_v: jnp.ndarray,
@@ -131,6 +134,29 @@ def planck_nu(nu, T):
 
 
 
+def compute_dust_opacity(freq_hz):
+    """
+    Dust opacity for protoplanetary disks in sub-mm
+    
+    Parameters:
+    -----------
+    freq_hz : array
+        Frequency in Hz
+    
+    Returns:
+    --------
+    kappa : array
+        Dust opacity in cm²/g
+    """
+    nu0 = 3e11  # 300 GHz (1 mm) reference frequency
+    kappa0 = 2.3  # cm²/g at 1 mm
+    beta = 1.0  # opacity index for disks with grain growth
+    
+    kappa = kappa0 * (freq_hz / nu0)**beta
+    return kappa
+
+
+
 def compute_spectral_cube_with_dust(
     camera_freqs: jnp.ndarray,
     gas_v: jnp.ndarray,
@@ -148,48 +174,40 @@ def compute_spectral_cube_with_dust(
     dust_temp: jnp.ndarray,
 ) -> jnp.ndarray:
     
+    # 0. --- RAY DIRECTION NORMALIZATION ---
+    # Flip all fields so that ray index 0 = closest to observer before computing
+    # any emissivity/extinction. Gas and dust must share the same ordering.
+    z_raw = ray_coords[..., 2]
+    is_forward = z_raw[0, 0, 0] > z_raw[0, 0, -1]
+    if not is_forward:
+        gas_v      = jnp.flip(gas_v,      axis=-2)
+        n_up       = jnp.flip(n_up,       axis=-1)
+        n_dn       = jnp.flip(n_dn,       axis=-1)
+        alpha_tot  = jnp.flip(alpha_tot,  axis=-1)
+        dust_alpha = jnp.flip(dust_alpha, axis=-1)
+        dust_temp  = jnp.flip(dust_temp,  axis=-1)
+        ray_coords = jnp.flip(ray_coords, axis=-2)
+
     # 1. --- GAS CONTRIBUTION ---
     doppler = -(1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
     dnu = expand_dims(camera_freqs, alpha_tot.ndim + 1, axis=-1) - nu0 - doppler * nu0
     line_profile = (cc / (alpha_tot * nu0 * jnp.sqrt(jnp.pi))) * jnp.exp(
         -(cc * dnu / (nu0 * alpha_tot)) ** 2
     )
-    
+
     const = hh * nu0 / (4 * jnp.pi)
     j_gas = const * n_up * a_ud * line_profile
     a_gas = const * (n_dn * b_du - n_up * b_ud) * line_profile
 
-    z_raw = ray_coords[..., 2]
-    is_forward = z_raw[0, 0, 0] > z_raw[0, 0, -1] # High Z to Low Z (assuming observer at +Z)
-    
-    if not is_forward:
-        # Flip everything along the ray axis to ensure index 0 = Observer
-        gas_v = jnp.flip(gas_v, axis=-2)
-        n_up = jnp.flip(n_up, axis=-1)
-        n_dn = jnp.flip(n_dn, axis=-1)
-        alpha_tot = jnp.flip(alpha_tot, axis=-1)
-        dust_alpha = jnp.flip(dust_alpha, axis=-1)
-        dust_temp = jnp.flip(dust_temp, axis=-1)
-        ray_coords = jnp.flip(ray_coords, axis=-2)
-    else:
-        ray_coords = ray_coords
-
     # 2. --- DUST CONTRIBUTION ---
-    if dust_alpha is not None and dust_temp is not None:
-        # Expand camera_freqs to match spatial dimensions for Planck calc
-        print('Doing dusty things...')
-        nu_axis = expand_dims(camera_freqs, dust_temp.ndim + 1, axis=-1)
-        
-        # Dust emissivity j_dust = alpha_dust * B_nu(T_dust)
-        # alpha_dust is your dust_profile (extinction)
-        b_nu_dust = planck_nu(nu_axis, dust_temp[None, ...])
-        j_dust = dust_alpha[None, ...] * b_nu_dust
-        a_dust = dust_alpha[None, ...]
-
-    else:
-        print('setting j and alpha to zero')
-        j_dust = 0.0
-        a_dust = 0.0
+    # dust_alpha is mass density [g/cm³]; multiply by frequency-dependent κ [cm²/g] → α [cm⁻¹]
+    nu_axis = expand_dims(camera_freqs, dust_temp.ndim + 1, axis=-1)
+    kappa_dust = compute_dust_opacity(camera_freqs)  # cm²/g
+    kappa_dust = expand_dims(kappa_dust, dust_alpha.ndim + 1, axis=-1)
+    alpha_dust_opacity = dust_alpha[None, ...] * kappa_dust  # [g/cm³] × [cm²/g] = [cm⁻¹]
+    b_nu_dust = planck_nu(nu_axis, dust_temp[None, ...])
+    j_dust = alpha_dust_opacity * b_nu_dust
+    a_dust = alpha_dust_opacity
 
     # 3. --- TOTAL MIXTURE ---
     j_tot = j_gas + j_dust
@@ -199,12 +217,11 @@ def compute_spectral_cube_with_dust(
     # 4. --- RAY TRACING (The Logic Remains the same, but using Totals) ---
     ray_ds = jnp.sqrt(jnp.sum(jnp.diff(ray_coords, axis=-2) ** 2, axis=-1))
 
-    
     # Average the extinction and emissivity over the segments
     dtau = 0.5 * (a_tot_mix[..., 1:] + a_tot_mix[..., :-1]) * ray_ds
     source_1st = 0.5 * (j_tot[..., 1:] + j_tot[..., :-1]) * ray_ds
     
-    # Source function S_nu = j_tot / a_tot
+    # Source function S_nu = j_tot / a_totx
     s_nu = j_tot / (a_tot_mix + 1e-30)
     
     # Second-order integration coefficients
