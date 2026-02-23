@@ -632,11 +632,8 @@ def render_cube_with_dust(
 
     images = jnp.clip(jnp.nan_to_num(images).reshape(-1, rays.ny, rays.nx)[:eval_freqs.size], 0.0)
 
-    plt.figure()
-    plt.imshow(images[0, ...])
-    plt.show()
-    
-    # images = images[1: ,: , :] - images[0, :, :]  # subtrack to make contsub
+    # images[0] is the continuum channel (at distant_freq, far from the line).
+    # Subtract it to obtain continuum-subtracted channels: images[1:] - images[0].
 
     return images
 
