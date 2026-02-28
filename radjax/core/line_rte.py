@@ -457,12 +457,12 @@ compute_spectral_cube_vmap = jax.vmap(
 compute_tau1_cube_pmap = jax.pmap(
     compute_tau1_cube,
     axis_name="freq",
-    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None),
+    in_axes=(0, None, None, None, None, None, None, None, None),
 )
 
 compute_tau1_cube_vmap = jax.vmap(
     compute_tau1_cube,
-    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None),
+    in_axes=(0, None, None, None, None, None, None, None, None, None),
 )
 
 compute_emission_height_cube_pmap = jax.pmap(
