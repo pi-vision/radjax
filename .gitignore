@@ -7,5 +7,5 @@
 *.nc
 figures/*
 mcmc_output/*
-*.log
+*.out
 *.err
