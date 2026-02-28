@@ -33,5 +33,5 @@ def shard_with_padding(xs, pad_value=0):
     # Assume all arrays have the same first dimension
     original_length = jax.tree_util.tree_leaves(xs)[0].shape[0]
 
-    sharded = jax.tree_map(pad_and_reshape, xs)
+    sharded = jax.tree.map(pad_and_reshape, xs)
     return sharded
