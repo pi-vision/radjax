@@ -5,4 +5,6 @@
 *.npy
 *.nc
 figures/*
-._*
+mcmc_output/*
+*.log
+*.err
