@@ -63,7 +63,7 @@ def compute_spectral_cube(
     nu0 : float
         Line rest frequency [Hz].
     pixel_area : float
-        Pixel solid-angle × distance² in cm² (used for Jy conversion).
+        Pixel solid angle [sr] (used for Jy conversion).
 
     Returns
     -------
@@ -85,7 +85,6 @@ def compute_spectral_cube(
          4 π                                   4 π      
     """
     # Compute doppler shift
-    # Note: doppler positive means moving toward observer, hence the minus sign
     doppler = -(1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
 
     # Define a vector line profile over multiple camera frequencies 
@@ -118,8 +117,8 @@ def compute_spectral_cube(
     attenuation = jnp.exp(-jnp.cumsum(jnp.pad(dtau, pad_width), axis=-1))[...,:-1]
     intensity = (source_2nd * attenuation).sum(axis=-1)
 
-    # Conversion from erg/s/cm/cm/ster to Jy/pixel
-    image_fluxes_jy =  pixel_area / pc**2 * 1e23 * intensity
+    # I_nu [erg/s/cm²/Hz/sr] × Ω_pix [sr] × 1e23 → Jy/pixel
+    image_fluxes_jy = pixel_area * 1e23 * intensity
     return image_fluxes_jy
 
 def alpha_total(
