@@ -74,10 +74,10 @@ def spherical_vec_to_cartesian(vector: jnp.ndarray, coords: jnp.ndarray) -> jnp.
     sint = rho / jnp.clip(r, min=eps)
 
     v_phi, v_theta, v_r = vector[..., 0], vector[..., 1], vector[..., 2]
-    dummy = sint * v_theta + cost * v_r
+    dummy = sint * v_r + cost * v_theta
     vx = cosp * dummy - sinp * v_phi
     vy = sinp * dummy + cosp * v_phi
-    vz = cost * v_theta - sint * v_r
+    vz = cost * v_r - sint * v_theta
     return jnp.stack([vx, vy, vz], axis=-1)
 
 def spherical_to_zr(ray_coords_sph: jnp.ndarray) -> jnp.ndarray:
