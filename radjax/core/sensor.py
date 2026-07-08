@@ -43,7 +43,7 @@ class RayBundle:
     nx: int
     ny: int
     coords_xyz: jnp.ndarray   # (H, W, N, 3), world XYZ along each ray
-    pixel_area: jnp.ndarray   # (H, W), projected area per pixel in [sr] or [cm^2] on image plane
+    pixel_area: jnp.ndarray   # (H, W), solid angle per pixel [sr]
     obs_dir: jnp.ndarray      # (3,), unit vector from source to observer
     
 @struct.dataclass
@@ -167,14 +167,14 @@ def rays_alma_projection(
 ) -> "RayBundle":
     """
     Construct pinhole rays through a finite-thickness disk slab and return a RayBundle.
-    Always uses the provided FOV (arcsec) to compute a constant pixel_area (cm^2).
+    Always uses the provided FOV (arcsec) to compute a constant pixel_area (sr).
 
     Returns
     -------
     RayBundle with:
       - nx, ny: int
       - coords_xyz: (ny, nx, nray, 3) world-space samples along each ray (far → near)
-      - pixel_area: (ny, nx) constant map of pixel area in cm^2
+      - pixel_area: (ny, nx) constant map of pixel solid angle in sr
       - obs_dir:    (3,) unit LOS in world coordinates after (incl, phi)
     """
     # ---- inputs & shapes
@@ -217,11 +217,9 @@ def rays_alma_projection(
     ray_coords = jnp.linspace(ray_start, ray_stop, nray, axis=1)  # (ny*nx, nray, 3)
     ray_coords = ray_coords.reshape(ny, nx, nray, 3)
 
-    # ---- pixel area from FOV (constant over the grid), in cm^2
-    # fov on the image plane at distance d: fov_cm = 2 * d * tan((fov_as*arcsec)/2)
-    fov_rad = fov_as * arcsec
-    fov_cm  = 2.0 * d_cm * jnp.tan(fov_rad / 2.0)
-    pixel_area = (fov_cm / float(npix)) ** 2
+    # ---- pixel solid angle [sr], distance-independent
+    fov_rad    = fov_as * arcsec
+    pixel_area = (2.0 * jnp.tan(fov_rad / 2.0) / float(npix)) ** 2
 
     rays = RayBundle(
         nx=nx, 
