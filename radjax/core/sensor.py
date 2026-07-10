@@ -44,8 +44,9 @@ class RayBundle:
     nx: int
     ny: int
     coords_xyz: jnp.ndarray   # (H, W, N, 3), world XYZ along each ray
-    pixel_area: jnp.ndarray   # (H, W), projected area per pixel in [sr] or [cm^2] on image plane
+    pixel_area: jnp.ndarray   # (H, W), projected pixel area in cm^2 at the source plane
     obs_dir: jnp.ndarray      # (3,), unit vector from source to observer
+    distance_pc: float        # source distance [pc], used for solid-angle flux conversion
     
 @struct.dataclass
 class ObservationParams:
@@ -79,6 +80,8 @@ class ObservationParams:
     vlsr: Optional[float] = None                          # m/s
 
     # SYNTHETIC mode field
+    # NOTE: interpreted as a HALF-width — rendered channels span
+    # [-velocity_width_kms, +velocity_width_kms] (see compute_camera_freqs).
     velocity_width_kms: Optional[float] = None            # km/s
 
     # ---- validations & mode logic ----
@@ -108,6 +111,10 @@ class ObservationParams:
             # no constraint on sign of vlsr; it’s frame-dependent
 
         # Basic sanity (shared)
+        # Ray sampling starts at z = +z_width/2, which is only the observer-near
+        # side for incl < 90 deg; the RT attenuation ordering assumes this.
+        if not (0.0 <= self.incl < 90.0):
+            raise ValueError("incl must be in [0, 90) degrees (attenuation ordering assumes the observer is above the midplane).")
         if self.distance <= 0:
             raise ValueError("distance must be positive [pc].")
         if self.fov <= 0:
@@ -147,12 +154,77 @@ class ObservationParams:
         """
         Bounds for channel construction:
         - REAL: return (vmin, vmax)
-        - SYNTHETIC: symmetric around 0, i.e., (-width/2, +width/2)
+        - SYNTHETIC: symmetric around 0, i.e., (-width, +width), matching
+          compute_camera_freqs which treats velocity_width_kms as a half-width.
         """
         if self.is_synthetic:
-            half = 0.5 * self.velocity_width_ms
+            half = self.velocity_width_ms
             return (-half, +half)
-        return self.velocity_range  # type: ignore    
+        return self.velocity_range  # type: ignore
+
+
+@struct.dataclass
+class ObsParams:
+    incl: float
+    posang: float
+    n_freqs: int
+    velocity_width_kms: float
+    v_sys: float
+    beam_size: float
+    distance: float
+    nray: int
+    fov: float
+    z_width: float
+    phi: float
+    noise: float
+
+    def validate(self):
+        return self
+    
+
+def obs_from_yaml(source: Union[str, Path, Dict[str, Any]]) -> ObsParams:
+    """
+    Load ObsParams from the `observation:` section of a YAML (or dict).
+    """
+
+    if isinstance(source, (str, Path)):
+        with open(Path(source), "r") as f:
+            cfg = yaml.safe_load(f) or {}
+    else:
+        cfg = dict(source)
+
+    if "observation" not in cfg:
+        raise KeyError("YAML is missing required `observation` section.")
+
+    o = dict(cfg["observation"])
+
+    # coerce floats
+    float_keys = [
+        "incl",
+        "posang",
+        "velocity_width_kms",
+        "v_sys",
+        "beam_size",
+        "distance",
+        "fov",
+        "phi",
+        "noise",
+        "z_width",
+    ]
+
+    for k in float_keys:
+        if k in o and o[k] is not None:
+            o[k] = float(o[k])
+
+    # integers
+    if "n_freqs" in o:
+        o["n_freqs"] = int(o["n_freqs"])
+    if "nray" in o:
+        o["nray"] = int(o["nray"])
+
+    obs = ObsParams(**o).validate()
+
+    return obs
 
 
 def rays_alma_projection(
@@ -174,7 +246,7 @@ def rays_alma_projection(
     -------
     RayBundle with:
       - nx, ny: int
-      - coords_xyz: (ny, nx, nray, 3) world-space samples along each ray (far → near)
+      - coords_xyz: (ny, nx, nray, 3) world-space samples along each ray (near → far, index 0 = top/near, index N-1 = bottom/far)
       - pixel_area: (ny, nx) constant map of pixel area in cm^2
       - obs_dir:    (3,) unit LOS in world coordinates after (incl, phi)
     """
@@ -200,14 +272,18 @@ def rays_alma_projection(
 
     # stack (ny*nx, 3), align to world; roll by -posang about LOS
     ray_dir = jnp.stack((ray_y_dir, ray_x_dir, ray_z_dir), axis=-1).reshape(ny * nx, 3)
-    ray_dir = grid.rotate_coords_angles(ray_dir, incl, -phi)
+    # Same (incl, phi) rotation as obs_dir above — a sign mismatch here makes the
+    # camera look away from the disk for any phi != 0.
+    ray_dir = grid.rotate_coords_angles(ray_dir, incl, phi)
     ray_dir = grid. rotate_coords_vector(ray_dir, obs_dir, -posang)
 
     # ---- intersections with z = ± z_width/2 (world coords in cm)
     d_cm     = distance * pc
     zhalf_cm = 0.5 * z_width * au
     denom = ray_dir[..., 2]
-    denom = jnp.where(jnp.abs(denom) < 1e-30, jnp.sign(denom) * 1e-30, denom)
+    # sign(0) == 0, so build the sign explicitly to keep exactly edge-on rays finite
+    denom_sign = jnp.where(denom >= 0, 1.0, -1.0)
+    denom = denom_sign * jnp.maximum(jnp.abs(denom), 1e-30)
 
     s = ( zhalf_cm - d_cm * obs_dir[2]) / denom
     t = (-zhalf_cm - d_cm * obs_dir[2]) / denom
@@ -225,11 +301,12 @@ def rays_alma_projection(
     pixel_area = (fov_cm / float(npix)) ** 2
 
     rays = RayBundle(
-        nx=nx, 
-        ny=ny, 
-        coords_xyz=ray_coords, 
-        pixel_area=pixel_area, 
-        obs_dir=obs_dir
+        nx=nx,
+        ny=ny,
+        coords_xyz=ray_coords,
+        pixel_area=pixel_area,
+        obs_dir=obs_dir,
+        distance_pc=distance
     )
     
     return rays
@@ -245,41 +322,24 @@ def rays_simulation_projection(
     z_width: float,              # [au]
     fov_cm: float,               # [cm], total field of view on a side
 ) -> "RayBundle":
-    pass
+    raise NotImplementedError("rays_simulation_projection is not yet implemented.")
 
 # TODO: rename to rays_from_alma_params since we might not use rays_alma_projection. Or otherwise remove alma from rays_alma_projection
 def rays_from_params(
-    obs_params: ObservationParams, 
-    x_sky: ArrayLike, 
+    obs_params: ObservationParams,
+    x_sky: ArrayLike,
     y_sky: ArrayLike
 ):
     return rays_alma_projection_jit(
         jnp.asarray(x_sky),
         jnp.asarray(y_sky),
-        float(obs_params.distance),
-        int(obs_params.nray),
-        float(obs_params.incl),
-        float(obs_params.phi),
-        float(obs_params.posang),
-        float(obs_params.z_width),
-        float(obs_params.fov),
-    )
-
-def rays_from_simulation_params(
-    obs_params: SimulationParams, 
-    x_sky: ArrayLike, 
-    y_sky: ArrayLike
-):
-    return rays_simulation_projection_jit(
-        jnp.asarray(x_sky),
-        jnp.asarray(y_sky),
-        float(obs_params.distance),
-        int(obs_params.nray),
-        float(obs_params.incl),
-        float(obs_params.phi),
-        float(obs_params.posang),
-        float(obs_params.z_width),
-        float(obs_params.fov),
+        obs_params.distance,
+        obs_params.nray,
+        obs_params.incl,
+        obs_params.phi,
+        obs_params.posang,
+        obs_params.z_width,
+        obs_params.fov,
     )
 
 
@@ -390,7 +450,6 @@ def params_to_yaml(obs: ObservationParams, filename: str | Path) -> None:
         vmin, vmax = obs.velocity_range
         obs_block.update({
             "velocity_range": [float(vmin), float(vmax)],
-            "velocity_width_kms": float(obs.velocity_width_kms),
             "vlsr": float(obs.vlsr),
         })
     else:  # synthetic
@@ -446,18 +505,26 @@ def print_params(params: "ObservationParams") -> None:
 # ----------------------------------------------------------------------------- #
 def compute_camera_freqs(
     num_freqs: int,
-    width_kms: float,
-    nu0: float,
+    half_width_kms: float = None,
+    nu0: float = None,
     v_sys: float = 0.0,
     num_subfreq: int = 1,
     subfreq_width: Optional[float] = None,
+    width_kms: Optional[float] = None,  # deprecated alias for half_width_kms
 ) -> jnp.ndarray:
     """
     Build a (possibly sub-sampled) frequency grid around line center.
+
+    Channels span velocities in [-half_width_kms, +half_width_kms] (i.e. the
+    TOTAL velocity coverage is 2 * half_width_kms). `width_kms` is accepted as
+    a deprecated alias with the same half-width meaning.
     """
-    # Doppler offsets: map linear velocity window into frequency offsets
-    # v positive (toward observer) reduces frequency → (1 - v/c)
-    v = (2 * jnp.arange(num_freqs) / (num_freqs - 1) - 1.0) * width_kms  # km/s
+    if half_width_kms is None:
+        half_width_kms = width_kms
+    if half_width_kms is None or nu0 is None:
+        raise TypeError("compute_camera_freqs requires half_width_kms and nu0.")
+    # Doppler offsets: radio convention, v positive = receding = lower frequency
+    v = (2 * jnp.arange(num_freqs) / (num_freqs - 1) - 1.0) * half_width_kms  # km/s
     camera_freqs = nu0 * (1.0 - (v_sys * 1e5) / cc - (v * 1e5) / cc)
 
     if num_subfreq > 1:
@@ -530,6 +597,7 @@ def render_cube(
     alpha_tot = line_rte.alpha_total(v_turb, temperature_ray)
 
     # Choose backend
+    nfreq = freqs.shape[0]
     if backend == "pmap":
         compute_fn = line_rte.compute_spectral_cube_pmap
         freqs = shard_with_padding(freqs)  # (ndev, F_per_dev)
@@ -539,13 +607,13 @@ def render_cube(
         compute_fn = line_rte.compute_spectral_cube
     else:
         raise ValueError(f"Unknown backend={backend!r}. Must be 'vmap', 'pmap', or 'none'.")
-    
+
     images = compute_fn(
         freqs, velocity_ray, alpha_tot, n_up, n_dn,
         mol.a_ud, mol.b_ud, mol.b_du,
-        rays.coords_xyz, rays.obs_dir, nu0, rays.pixel_area
+        rays.coords_xyz, rays.obs_dir, nu0, rays.pixel_area, rays.distance_pc
     )
-    images = jnp.clip(jnp.nan_to_num(images).reshape(-1, rays.ny, rays.nx)[:freqs.size], 0.0)
+    images = jnp.clip(jnp.nan_to_num(images).reshape(-1, rays.ny, rays.nx)[:nfreq], 0.0)
     
     return images
 
@@ -608,32 +676,37 @@ def render_cube_with_dust(
     # Line opacity
     alpha_tot = line_rte.alpha_total(v_turb, temperature_ray)
 
+    # Build eval_freqs (prepend a continuum sentinel) before any sharding
+    freq_diff = freqs[1] - freqs[0]
+    distant_freq = freqs[0] - 50 * freq_diff
+    eval_freqs = jnp.concatenate([jnp.array([distant_freq]), freqs])
+    neval = eval_freqs.shape[0]
+
     # Choose backend
     if backend == "pmap":
         compute_fn = line_rte.compute_spectral_cube_dust_pmap
-        freqs = shard_with_padding(freqs)  # (ndev, F_per_dev)
+        eval_freqs = shard_with_padding(eval_freqs)  # (ndev, F_per_dev)
     elif backend == "vmap":
         compute_fn = line_rte.compute_spectral_cube_dust_vmap
-    elif backend == "none":
-        compute_fn = line_rte.compute_spectral_cube_with_dust
+    elif backend in ("scan", "none"):
+        # 'none' maps to scan: processes one channel at a time without vmap/pmap.
+        compute_fn = line_rte.compute_spectral_cube_dust_scan
     else:
-        raise ValueError(f"Unknown backend={backend!r}. Must be 'vmap', 'pmap', or 'none'.")
-    
-
-    freq_diff = freqs[1] - freqs[0]
-    distant_freq = freqs[0] - 50*freq_diff 
-    eval_freqs = jnp.concatenate([jnp.array([distant_freq]), freqs])
+        raise ValueError(f"Unknown backend={backend!r}. Must be 'vmap', 'pmap', 'scan', or 'none'.")
 
     images = compute_fn(
         eval_freqs, velocity_ray, alpha_tot, n_up, n_dn,
         mol.a_ud, mol.b_ud, mol.b_du,
-        rays.coords_xyz, rays.obs_dir, nu0, rays.pixel_area, dust_alpha, dust_temp_profile
+        rays.coords_xyz, rays.obs_dir, nu0, rays.pixel_area, rays.distance_pc,
+        dust_alpha, dust_temp_profile
     )
 
-    images = jnp.clip(jnp.nan_to_num(images).reshape(-1, rays.ny, rays.nx)[:eval_freqs.size], 0.0)
+    images = jnp.nan_to_num(images).reshape(-1, rays.ny, rays.nx)[:neval]
 
     # images[0] is the continuum channel (at distant_freq, far from the line).
-    # Subtract it to obtain continuum-subtracted channels: images[1:] - images[0].
+    # Subtract it from each line channel and clip negatives.
+    continuum = images[0]
+    images = jnp.clip(images[1:] - continuum, 0.0)
 
     return images
 
@@ -786,7 +859,7 @@ def render_emission_height_cube(
         freqs, velocity_ray, alpha_tot, n_up, n_dn,
         mol.a_ud, mol.b_ud, mol.b_du,
         rays.coords_xyz, rays.obs_dir, nu0, cutoff=cutoff_intensity
-    )[0]
+    )
 
     return z_cube
 
@@ -825,7 +898,7 @@ def sample_symmetric_disk__along_rays(
     ----------
     rays : RayBundle
         Container with:
-          - coords_xyz : (H, W, N, 3) world-space samples along each ray (far → near)
+          - coords_xyz : (H, W, N, 3) world-space samples along each ray (near → far, index 0 = top/near, index N-1 = bottom/far)
           - pixel_area : (H, W) (unused here)
           - obs_dir    : (3,) (unused here)
     bbox : jnp.ndarray, shape (2,2)

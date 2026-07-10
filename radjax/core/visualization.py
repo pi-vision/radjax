@@ -112,8 +112,7 @@ def compare_images(
             raise ValueError("Expected three axes for compare_images.")
         fig = axes[0].get_figure()
 
-    vmin = float(np.nanmin([np.nanmin(img1), np.nanmin(img2)]))
-    vmax = float(np.nanmax([np.nanmax(img1), np.nanmax(img2)]))
+    vmin, vmax = _safe_minmax(np.stack([np.asarray(img1), np.asarray(img2)]))
 
     # First two: raw images
     for ax, img in zip(axes[:-1], [img1, img2]):
@@ -366,13 +365,14 @@ def slider(
     def imshow_frame(frame: int):
         img = np.take(movie, frame, axis=axis)
         im.set_array(img)
-        # If vmin/vmax unspecified, auto-scale per frame
-        clim_min = vmin if vmin is not None else float(np.nanmin(img))
-        clim_max = vmax if vmax is not None else float(np.nanmax(img))
-        if not np.isfinite(clim_min):
-            clim_min = 0.0
-        if not np.isfinite(clim_max):
-            clim_max = 1.0
+        if vmin is not None and vmax is not None:
+            clim_min, clim_max = vmin, vmax
+        else:
+            clim_min, clim_max = _safe_minmax(img)
+            if vmin is not None:
+                clim_min = vmin
+            if vmax is not None:
+                clim_max = vmax
         cbar.mappable.set_clim([clim_min, clim_max])
 
     interact(imshow_frame, frame=(0, num_frames - 1))
@@ -673,5 +673,5 @@ __all__ = [
     "slider",
     "slider_frame_comparison",
     "animate_movies_synced",
-    "plot_disk_profile",
+    "plot_disk_profile_rz",
 ]

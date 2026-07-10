@@ -13,7 +13,7 @@ Conventions
 - r, z in AU
 - Masses in grams (consistent with G)
 - Temperatures in K
-- Velocities in m/s
+- Velocities in cm/s (CGS, consistent with cc in line_rte)
 - Columns in cm^-2; number densities in cm^-3
 
 These functions are intentionally independent of any config/dataclass so they
@@ -25,8 +25,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-# constants module must define: G [cgs], au [cm], kk [erg/K]
-from .consts import G, au, kk
+# constants module must define: G [cgs], au [cm], kk [erg/K], m_h2 [g]
+from .consts import G, au, kk, m_h2
 
 
 # ----------------------------------------------------------------------------- #
@@ -114,7 +114,8 @@ def number_density_profile(
     jnp.ndarray
         n_H2 [cm^-3] matching (z, r) broadcasting.
     """
-    sigma_0 = (2.0 - gamma) * (M_gas / (2.0 * jnp.pi * (r_c_au * au) ** 2)) * jnp.exp(r_in_au / r_c_au) ** (2.0 - gamma)
+    # Self-similar disk truncation factor: exp[(r_in/r_c)^(2-gamma)]
+    sigma_0 = (2.0 - gamma) * (M_gas / (2.0 * jnp.pi * (r_c_au * au) ** 2)) * jnp.exp((r_in_au / r_c_au) ** (2.0 - gamma))
     sigma   = sigma_0 * (r[0] / r_c_au) ** (-gamma) * jnp.exp(-(r[0] / r_c_au) ** (2.0 - gamma))
 
     dz      = jnp.diff(z * au, axis=0)
@@ -124,8 +125,13 @@ def number_density_profile(
     logrho  = jnp.cumsum(dlogrho * dz, axis=0)
     logrho  = jnp.pad(logrho, pad_width=[(1, 0), (0, 0)])
     rho     = jnp.exp(logrho)
-    rho     = sigma * rho / (1.0 + jnp.sum(rho[1:] * dz, axis=0, keepdims=True))
-    return rho / m_mol_h
+    # Normalize the z >= 0 half-column to sigma/2 (standard convention:
+    # sigma is the full column integral over -inf < z < inf), using the
+    # trapezoid rule for the column of the unnormalized profile.
+    half_column = jnp.sum(0.5 * (rho[1:] + rho[:-1]) * dz, axis=0, keepdims=True)
+    rho     = 0.5 * sigma * rho / half_column
+    # Mass density -> H2 number density (X_CO is defined relative to H2)
+    return rho / m_h2
 
 
 def surface_density(z: jnp.ndarray, nd: jnp.ndarray) -> jnp.ndarray:
@@ -221,21 +227,27 @@ def azimuthal_velocity(
         Array of shape (..., 3) containing disk-frame coordinates [AU].
         Only x=coords[...,0] and y=coords[...,1] are used.
     v_phi : jnp.ndarray
-        Scalar azimuthal speed [m/s], broadcastable to coords[...,0].
+        Scalar azimuthal speed [cm/s], broadcastable to coords[...,0].
 
     Returns
     -------
     jnp.ndarray
-        Velocity field (..., 3) [m/s], with components (vx, vy, vz=0).
+        Velocity field (..., 3) [cm/s], with components (vx, vy, vz=0).
+
+    Notes
+    -----
+    Pure rotation about +z: v = v_phi * (-y, x, 0) / r (CCW seen from +z).
+    This sign choice keeps the y-component identical to the previous
+    implementation, so rendered cubes at phi = 0 are unchanged.
     """
     ray_r = jnp.sqrt(coords[..., 0] ** 2 + coords[..., 1] ** 2)
     ray_r = jnp.where(ray_r == 0.0, 1.0, ray_r)  # avoid NaNs at r=0
-    cosp  = coords[..., 1] / ray_r
-    sinp  = coords[..., 0] / ray_r
-    vy    = v_phi * cosp
-    vx    = v_phi * sinp
-    vz    = jnp.zeros_like(v_phi)
-    return jnp.stack([vy, vx, vz], axis=-1)
+    x     = coords[..., 0] / ray_r
+    y     = coords[..., 1] / ray_r
+    vx    = -v_phi * y
+    vy    = v_phi * x
+    vz    = jnp.zeros_like(vx)  # zeros_like(vx), not v_phi: v_phi may be scalar
+    return jnp.stack([vx, vy, vz], axis=-1)
 
 
 # ----------------------------------------------------------------------------- #

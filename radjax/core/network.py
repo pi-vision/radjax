@@ -228,7 +228,7 @@ def posenc(x: jnp.ndarray, deg: int) -> jnp.ndarray:
     
 def shard(xs):
     """Split data into shards for multiple devices along the first dimension."""
-    return jax.tree_map(lambda x: x.reshape((jax.local_device_count(), -1) + x.shape[1:]), xs)
+    return jax.tree.map(lambda x: x.reshape((jax.local_device_count(), -1) + x.shape[1:]), xs)
 
 
 def safe_sin(x: jnp.ndarray) -> jnp.ndarray:

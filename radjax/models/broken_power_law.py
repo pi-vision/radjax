@@ -10,7 +10,7 @@ masses in grams (consistent with G).
 """
 
 from __future__ import annotations
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional, Union
 from pathlib import Path
 import dataclasses as dc
 
@@ -26,6 +26,7 @@ from ..core.consts import M_sun, au, m_mol_h
 from ..core import phys
 from ..core import sensor
 from ..core import chemistry as chem
+from ..core.inference import SamplerState
 
 @struct.dataclass
 class BaseDisk:
@@ -114,7 +115,7 @@ class DiskParams:
 
     # Dynamics / kinematics
     M_star: float  # grams internally
-    v_turb: float  # m/s internally
+    v_turb: float  # dimensionless (scales local sound speed)
 
     # Model grid
     resolution: int
@@ -122,6 +123,12 @@ class DiskParams:
     z_max: float
     r_min: float
     r_max: float
+
+    # --- new ring fields ---
+    ring_radii: jnp.ndarray = dc.field(default_factory=lambda: jnp.empty(0))
+    ring_widths: jnp.ndarray = dc.field(default_factory=lambda: jnp.empty(0))
+    ring_densities: jnp.ndarray = dc.field(default_factory=lambda: jnp.empty(0))
+    ring_heights: jnp.ndarray = dc.field(default_factory=lambda: jnp.empty(0))
 
     def validate(self) -> "DiskParams":
         """Lightweight validation on creation."""
@@ -134,13 +141,9 @@ class DiskParams:
         if not (self.r_max >= self.r_min): raise ValueError("r_max must be ≥ r_min")
         return self
 
-def disk_from_yaml(source: Union[str, Path, Dict[str, Any]]) -> DiskParams:
-    """
-    Load DiskParams from the `disk:` section of a YAML (or dict).
 
-    Unit conversions applied to `disk:`:
-      M_star, M_gas: [M_sun] → grams
-    """
+def disk_from_yaml(source: Union[str, Path, Dict[str, Any]]) -> DiskParams:
+
     if isinstance(source, (str, Path)):
         with open(Path(source), "r") as f:
             cfg = yaml.safe_load(f) or {}
@@ -149,24 +152,50 @@ def disk_from_yaml(source: Union[str, Path, Dict[str, Any]]) -> DiskParams:
 
     if "disk" not in cfg:
         raise KeyError("YAML is missing required `disk` section.")
+
     d = dict(cfg["disk"])
 
-    # conversions to internal units
+    # --- extract rings before dataclass construction ---
+    rings = d.pop("rings", [])
+
+    # unit conversions
     d["M_star"] = float(d["M_star"]) * M_sun
     d["M_gas"]  = float(d["M_gas"])  * M_sun
 
-    # coerce numerics
     float_keys = [
         "T_mid1","T_atm1","q","q_in","z_q0","delta",
         "r_scale","r_in","r_break","log_r_c","gamma",
         "M_gas","M_star","v_turb","z_min","z_max","r_min","r_max",
     ]
+
     for k in float_keys:
         if k in d and d[k] is not None:
             d[k] = float(d[k])
+
     d["resolution"] = int(d["resolution"])
 
-    return DiskParams(**d).validate()
+    # ---- convert rings BEFORE constructing DiskParams ----
+    if rings:
+        ring_radii = jnp.array([r["radius"] for r in rings])
+        ring_widths = jnp.array([r["width"] for r in rings])
+        ring_densities = jnp.array([r["density"] for r in rings])
+        ring_heights = jnp.array([r["height"] for r in rings])
+    else:
+        ring_radii = jnp.empty(0)
+        ring_widths = jnp.empty(0)
+        ring_densities = jnp.empty(0)
+        ring_heights = jnp.empty(0)
+
+    disk = DiskParams(
+        **d,
+        ring_radii=ring_radii,
+        ring_widths=ring_widths,
+        ring_densities=ring_densities,
+        ring_heights=ring_heights,
+    ).validate()
+
+    return disk
+
 
 def params_to_yaml_path(params: DiskParams, path: str | Path) -> None:
     """
@@ -206,7 +235,7 @@ def params_to_yaml_path(params: DiskParams, path: str | Path) -> None:
         "delta": float(params.delta),
     
         # kinematics
-        "v_turb": float(params.v_turb / 1.0e3),  # [km/s]
+        "v_turb": float(params.v_turb),  # dimensionless
     
         # model grid
         "resolution": int(params.resolution),
@@ -353,13 +382,27 @@ def temperature_profile(z: jnp.ndarray, r: jnp.ndarray, params: DiskParams) -> j
     jnp.ndarray
         Temperature [K] with shape broadcast(z, r).
     """
-    q_eff = jnp.where(r <= params.r_break, params.q_in, params.q)
-    T_mid = params.T_mid1 * (r / params.r_scale) ** q_eff
-    T_atm = params.T_atm1 * (r / params.r_scale) ** q_eff
-    z_q   = params.z_q0 * (r / params.r_scale) ** 1.3
+    # Guard r -> 0: keeps z_q finite and power laws bounded near the star.
+    r_safe = jnp.maximum(r, 1e-3)
+    # Continuous broken power law: outer branch anchored at r_scale, inner
+    # branch anchored at r_break so T is continuous across the break.
+    scale_outer = (r_safe / params.r_scale) ** params.q
+    # Clamp r_break inside the power laws: r_break <= 0 (e.g. -1) disables the
+    # inner branch via the where-condition below, but an unclamped negative
+    # base to a fractional power is NaN in the *untaken* branch and would
+    # poison gradients.
+    rb_safe = jnp.maximum(params.r_break, 1e-3)
+    scale_inner = (rb_safe / params.r_scale) ** params.q * (r_safe / rb_safe) ** params.q_in
+    radial_scale = jnp.where(r_safe <= params.r_break, scale_inner, scale_outer)
+    T_mid = params.T_mid1 * radial_scale
+    T_atm = params.T_atm1 * radial_scale
+    z_q   = params.z_q0 * (r_safe / params.r_scale) ** 1.3
+    # Clip the cos argument to [0, pi/2] so the untaken where-branch stays
+    # finite (cos < 0 raised to a fractional power is NaN and poisons grads).
+    cos_arg = jnp.clip(jnp.pi * jnp.abs(z) / (2.0 * z_q), 0.0, 0.5 * jnp.pi)
     return jnp.where(
-        z < z_q,
-        T_atm + (T_mid - T_atm) * jnp.cos(jnp.pi * z / (2.0 * z_q)) ** (2.0 * params.delta),
+        jnp.abs(z) < z_q,
+        T_atm + (T_mid - T_atm) * jnp.cos(cos_arg) ** (2.0 * params.delta),
         T_atm,
     )
 

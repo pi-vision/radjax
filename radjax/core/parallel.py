@@ -12,12 +12,12 @@ def shard(xs: Any) -> Any:
     ndev = jax.local_device_count()
     def _reshape(x):
         return x.reshape((ndev, -1) + x.shape[1:])
-    return jax.tree_map(_reshape, xs)
+    return jax.tree.map(_reshape, xs)
 
 def shard_with_padding(xs, pad_value=0):
     """
     Pads and reshapes xs for sharding across devices.
-    Returns (sharded_xs, original_length).
+    Returns sharded_xs with shape (n_devices, padded_len_per_device, ...).
     """
     n_devices = jax.local_device_count()
 
@@ -29,9 +29,6 @@ def shard_with_padding(xs, pad_value=0):
             x = jnp.pad(x, pad_width, constant_values=pad_value)
         x = x.reshape((n_devices, -1) + x.shape[1:])
         return x
-
-    # Assume all arrays have the same first dimension
-    original_length = jax.tree_util.tree_leaves(xs)[0].shape[0]
 
     sharded = jax.tree.map(pad_and_reshape, xs)
     return sharded

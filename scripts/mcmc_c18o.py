@@ -202,7 +202,7 @@ ray_coords_pinhole, obs_dir_pinhole = sensor.pinhole_disk_projection(
     projection_pinhole.z_width
 )
 
-beam = data_cube.beams_per_pix * sensor.beam(
+beam = data_cube.pix_per_beam * sensor.beam(
     data_cube.dpix, data_cube.bmaj, data_cube.bmin, data_cube.bpa
 )
 

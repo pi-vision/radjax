@@ -16,14 +16,18 @@ from .core import dust
 
 __version__ = "0.1.0"
 __all__ = [
-    "line_rte", 
-    "grid", 
+    "line_rte",
+    "grid",
     "sensor",
-    "parametric_disk",
-    "visualization", 
-    "io", 
-    "alma_io", 
-    "dust"
+    "chemistry",
+    "phys",
+    "visualization",
+    "alma_io",
+    "dust",
+    "parallel",
+    "utils",
+    "inference",
+    "broken_power_law",
 ]
 
 

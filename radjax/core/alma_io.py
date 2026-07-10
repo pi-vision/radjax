@@ -33,7 +33,7 @@ class PreparedALMACube:
     npix: int
     x_sky: ArrayLike           # (ny, nx) arcsec
     y_sky: ArrayLike           # (ny, nx) arcsec
-    beam_kernel: ArrayLike     # scaled by beams_per_pix
+    beam_kernel: ArrayLike     # scaled by pix_per_beam
 
 
 def prepare_alma_cube(
@@ -90,7 +90,7 @@ def prepare_alma_cube(
     from . import sensor
     kernel = sensor.beam(cube.dpix, cube.bmaj, cube.bmin, cube.bpa)
     kernel = jnp.asarray(kernel) if to_jax else np.asarray(kernel)
-    beam_kernel = cube.beams_per_pix * kernel
+    beam_kernel = cube.pix_per_beam * kernel
 
     # cast
     if to_jax:

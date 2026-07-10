@@ -43,6 +43,7 @@ def compute_spectral_cube(
     obs_dir: jnp.ndarray,
     nu0: float,
     pixel_area: float,
+    distance_pc: float,
 ) -> jnp.ndarray:
     """
     Perform radiative transfer along rays to produce an image cube. Output units are Jy/pixel.
@@ -81,16 +82,17 @@ def compute_spectral_cube(
     More info: https://www.ita.uni-heidelberg.de/~dullemond/software/radmc-3d/manual_radmc3d/imagesspectra.html#sec-second-order
     """
     # Compute doppler shift
-    # Note: doppler positive means moving toward observer, hence the minus sign
-    doppler = -(1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
+    # obs_dir points toward the observer, so obs_dir·v > 0 means approaching
+    # gas, which must appear blueshifted: nu_peak = nu0 * (1 + v_los/c).
+    doppler = (1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
 
-    # Define a vector line profile over multiple camera frequencies 
+    # Define a vector line profile over multiple camera frequencies
     # The line profile is a Gaussian with width (alpha) and shifted by doppler
     dnu = expand_dims(camera_freqs, alpha_tot.ndim + 1, axis=-1) - nu0 - doppler * nu0
     line_profile = (cc / (alpha_tot * nu0 * jnp.sqrt(jnp.pi))) * jnp.exp(
         -(cc * dnu / (nu0 * alpha_tot)) ** 2
     )
-    
+
     # Compute emissivity (j_nu) and extinction (alpha_nu) for radiative transfer
     #     h nu_0                                          h nu_0
     # j = ------ n_up A_ud * phi(omega, nu)   ;  alpha = ------ ( n_down B_du - n_up B_ud ) * phi(omega, nu)
@@ -105,20 +107,22 @@ def compute_spectral_cube(
 
     # First order interpolation of the source
     source_1st = 0.5 * (j_nu[...,1:] + j_nu[...,:-1]) * ray_ds
-    
-    # Second-order integration
+
+    # Second-order integration: I = beta * S_near + (1 - e^-dtau - beta) * S_far,
+    # with index :-1 the near (observer-side) end of each segment. In the optically
+    # thick limit beta -> 1 so the observer sees the near-side source function.
     s_nu = j_nu / (a_nu + 1e-30)   # Radmc3d has +1e-99 but this results in nans
     beta = (dtau - 1 + jnp.exp(-dtau)) / (dtau + 1e-30)
     beta = jnp.where(dtau > 1e-6, beta, 0.5*dtau)
-    source_2nd = (1 - jnp.exp(-dtau) - beta) * s_nu[...,:-1] + beta * s_nu[...,1:]
+    source_2nd = beta * s_nu[...,:-1] + (1 - jnp.exp(-dtau) - beta) * s_nu[...,1:]
     source_2nd = jnp.where(source_2nd < source_1st, source_2nd, source_1st)
 
     pad_width = [(0, 0)] * (dtau.ndim - 1) + [(1, 0)]
     attenuation = jnp.exp(-jnp.cumsum(jnp.pad(dtau, pad_width), axis=-1))[...,:-1]
     intensity = (source_2nd * attenuation).sum(axis=-1)
 
-    # Conversion from erg/s/cm/cm/ster to Jy/pixel
-    image_fluxes_jy =  pixel_area / pc**2 * 1e23 * intensity
+    # Conversion from erg/s/cm²/Hz/sr to Jy/pixel
+    image_fluxes_jy = pixel_area / (distance_pc * pc)**2 * 1e23 * intensity
     return image_fluxes_jy
 
 
@@ -165,76 +169,48 @@ def compute_spectral_cube_with_dust(
     obs_dir: jnp.ndarray,
     nu0: float,
     pixel_area: float,
+    distance_pc: float,
     dust_alpha: jnp.ndarray,
     dust_temp: jnp.ndarray,
 ) -> jnp.ndarray:
-    
-    # 0. --- RAY DIRECTION NORMALIZATION ---
-    # Flip all fields so that ray index 0 = closest to observer before computing
-    # any emissivity/extinction. Gas and dust must share the same ordering.
-    z_raw = ray_coords[..., 2]
-    is_forward = z_raw[0, 0, 0] > z_raw[0, 0, -1]
-    if not is_forward:
-        gas_v      = jnp.flip(gas_v,      axis=-2)
-        n_up       = jnp.flip(n_up,       axis=-1)
-        n_dn       = jnp.flip(n_dn,       axis=-1)
-        alpha_tot  = jnp.flip(alpha_tot,  axis=-1)
-        dust_alpha = jnp.flip(dust_alpha, axis=-1)
-        dust_temp  = jnp.flip(dust_temp,  axis=-1)
-        ray_coords = jnp.flip(ray_coords, axis=-2)
+    # When called via vmap, camera_freqs is a scalar (one frequency per call).
+    # Avoid storing separate gas/dust intermediates — compute j_tot and a_tot directly
+    # to minimize peak memory when all frequency channels are materialized simultaneously.
 
-    # 1. --- GAS CONTRIBUTION ---
-    doppler = -(1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
-    dnu = expand_dims(camera_freqs, alpha_tot.ndim + 1, axis=-1) - nu0 - doppler * nu0
+    # Gas line profile (doppler shift along LOS; approaching gas is blueshifted)
+    doppler = (1.0 / cc) * jnp.sum(obs_dir * gas_v, axis=-1)
+    dnu = camera_freqs - nu0 - doppler * nu0
     line_profile = (cc / (alpha_tot * nu0 * jnp.sqrt(jnp.pi))) * jnp.exp(
         -(cc * dnu / (nu0 * alpha_tot)) ** 2
     )
 
     const = hh * nu0 / (4 * jnp.pi)
-    j_gas = const * n_up * a_ud * line_profile
-    a_gas = const * (n_dn * b_du - n_up * b_ud) * line_profile
 
-    # 2. --- DUST CONTRIBUTION ---
-    # dust_alpha is mass density [g/cm³]; multiply by frequency-dependent κ [cm²/g] → α [cm⁻¹]
-    nu_axis = expand_dims(camera_freqs, dust_temp.ndim + 1, axis=-1)
-    kappa_dust = compute_dust_opacity(camera_freqs)  # cm²/g
-    kappa_dust = expand_dims(kappa_dust, dust_alpha.ndim + 1, axis=-1)
-    alpha_dust_opacity = dust_alpha[None, ...] * kappa_dust  # [g/cm³] × [cm²/g] = [cm⁻¹]
-    b_nu_dust = planck_nu(nu_axis, dust_temp[None, ...])
-    j_dust = alpha_dust_opacity * b_nu_dust
-    a_dust = alpha_dust_opacity
+    # Dust extinction coefficient: dust_alpha [g/cm³] × κ(ν) [cm²/g] → [cm⁻¹]
+    # kappa_dust is a scalar at this frequency; no extra array allocation needed.
+    kappa_dust = compute_dust_opacity(camera_freqs)
+    a_dust = dust_alpha * kappa_dust  # (H, W, N)
 
-    # 3. --- TOTAL MIXTURE ---
-    j_tot = j_gas + j_dust
-    a_tot_mix = a_gas + a_dust
+    # Fused total emissivity and extinction — avoids storing j_gas, a_gas, j_dust separately
+    j_tot = const * n_up * a_ud * line_profile + a_dust * planck_nu(camera_freqs, dust_temp)
+    a_tot = const * (n_dn * b_du - n_up * b_ud) * line_profile + a_dust
 
-
-    # 4. --- RAY TRACING (The Logic Remains the same, but using Totals) ---
+    # Ray tracing
     ray_ds = jnp.sqrt(jnp.sum(jnp.diff(ray_coords, axis=-2) ** 2, axis=-1))
-
-    # Average the extinction and emissivity over the segments
-    dtau = 0.5 * (a_tot_mix[..., 1:] + a_tot_mix[..., :-1]) * ray_ds
+    dtau = 0.5 * (a_tot[..., 1:] + a_tot[..., :-1]) * ray_ds
     source_1st = 0.5 * (j_tot[..., 1:] + j_tot[..., :-1]) * ray_ds
-    
-    # Source function S_nu = j_tot / a_totx
-    s_nu = j_tot / (a_tot_mix + 1e-30)
-    
-    # Second-order integration coefficients
+
+    s_nu = j_tot / (a_tot + 1e-30)
     beta = (dtau - 1 + jnp.exp(-dtau)) / (dtau + 1e-30)
     beta = jnp.where(dtau > 1e-6, beta, 0.5 * dtau)
-    
-    # Second-order Source Term
-    source_2nd = (1 - jnp.exp(-dtau) - beta) * s_nu[..., :-1] + beta * s_nu[..., 1:]
+    source_2nd = beta * s_nu[..., :-1] + (1 - jnp.exp(-dtau) - beta) * s_nu[..., 1:]
     source_2nd = jnp.where(source_2nd < source_1st, source_2nd, source_1st)
 
-    # Accumulate Intensity
     pad_width = [(0, 0)] * (dtau.ndim - 1) + [(1, 0)]
     attenuation = jnp.exp(-jnp.cumsum(jnp.pad(dtau, pad_width), axis=-1))[..., :-1]
     intensity = (source_2nd * attenuation).sum(axis=-1)
 
-    # Final conversion to Jy/pixel
-    image_fluxes_jy = pixel_area / pc**2 * 1e23 * intensity
-    return image_fluxes_jy
+    return pixel_area / (distance_pc * pc)**2 * 1e23 * intensity
 
 
 
@@ -308,9 +284,8 @@ def compute_emission_height_cube(
     cutoff : float
         Minimum intensity cutoff to consider a pixel valid (not background diffusion)
     """
-        # Compute doppler shift
-    # Note: doppler positive means moving toward observer, hence the minus sign
-    doppler = -(1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
+        # Compute doppler shift (approaching gas is blueshifted)
+    doppler = (1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
 
     # Define a vector line profile over multiple camera frequencies 
     # The line profile is a Gaussian with width (alpha) and shifted by doppler
@@ -333,11 +308,11 @@ def compute_emission_height_cube(
 
     z_raw = ray_coords[..., 2]
     is_forward = z_raw[0, 0, 0] > z_raw[0, 0, -1]
-    if not is_forward:
-        dtau = jnp.flip(dtau, axis=-1)
-        j_nu = jnp.flip(j_nu, axis=-1)
-        a_nu = jnp.flip(a_nu, axis=-1)
-        z_raw = jnp.flip(z_raw, axis=-1)
+    # jnp.where instead of Python if/else so this is safe inside jax.lax.scan.
+    dtau  = jnp.where(is_forward, dtau,  jnp.flip(dtau,  axis=-1))
+    j_nu  = jnp.where(is_forward, j_nu,  jnp.flip(j_nu,  axis=-1))
+    a_nu  = jnp.where(is_forward, a_nu,  jnp.flip(a_nu,  axis=-1))
+    z_raw = jnp.where(is_forward, z_raw, jnp.flip(z_raw, axis=-1))
     
     # Mid-point Z-coordinates for the segments
     z_mid = 0.5 * (z_raw[..., 1:] + z_raw[..., :-1])
@@ -346,7 +321,7 @@ def compute_emission_height_cube(
     s_nu = j_nu / (a_nu + 1e-30)
     beta = (dtau - 1 + jnp.exp(-dtau)) / (dtau + 1e-30)
     beta = jnp.where(dtau > 1e-6, beta, 0.5*dtau)
-    source_term = (1 - jnp.exp(-dtau) - beta) * s_nu[...,:-1] + beta * s_nu[...,1:]
+    source_term = beta * s_nu[...,:-1] + (1 - jnp.exp(-dtau) - beta) * s_nu[...,1:]
 
     # Calculate Attenuation (e^-tau) along the ray
     pad_width = [(0, 0)] * (dtau.ndim - 1) + [(1, 0)]
@@ -361,7 +336,7 @@ def compute_emission_height_cube(
     avg_z = (emission_weight * z_mid).sum(axis=-1) / (total_intensity + 1e-30)
 
     # Clean up optically thin pixels where no significant emission occurred
-    return jnp.where(total_intensity > cutoff, avg_z, jnp.nan), 
+    return jnp.where(total_intensity > cutoff, avg_z, jnp.nan)
 
 
 def compute_tau1_cube(
@@ -399,7 +374,7 @@ def compute_tau1_cube(
         Line rest frequency.
     """
 
-    doppler = -(1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
+    doppler = (1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
     dnu = expand_dims(camera_freqs, alpha_tot.ndim + 1, axis=-1) - nu0 - doppler * nu0
     line_profile = (cc / (alpha_tot * nu0 * jnp.sqrt(jnp.pi))) * jnp.exp(
         -(cc * dnu / (nu0 * alpha_tot)) ** 2
@@ -417,12 +392,10 @@ def compute_tau1_cube(
 
     z_raw = ray_coords[..., 2] # (200, 200, 20)
     is_forward = z_raw[0, 0, 0] > z_raw[0, 0, -1]
-    if is_forward:
-        dtau_ordered = dtau
-        z_ordered = z_raw
-    else:
-        dtau_ordered = jnp.flip(dtau, axis=-1)
-        z_ordered = jnp.flip(z_raw, axis=-1)
+    # Use jnp.where instead of a Python if/else so this is safe inside
+    # jax.lax.scan / jit where is_forward is a traced boolean.
+    dtau_ordered = jnp.where(is_forward, dtau, jnp.flip(dtau, axis=-1))
+    z_ordered    = jnp.where(is_forward, z_raw, jnp.flip(z_raw, axis=-1))
 
     tau_sum = jnp.cumsum(dtau_ordered, axis=-1)
     # Find the FIRST point where tau >= 1
@@ -446,18 +419,18 @@ def compute_tau1_cube(
 compute_spectral_cube_pmap = jax.pmap(
     compute_spectral_cube,
     axis_name="freq",
-    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None),
+    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None, None),
 )
 # Vectorize over frequency axis on a single device
 compute_spectral_cube_vmap = jax.vmap(
     compute_spectral_cube,
-    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None),
+    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None, None),
 )
 
 compute_tau1_cube_pmap = jax.pmap(
     compute_tau1_cube,
     axis_name="freq",
-    in_axes=(0, None, None, None, None, None, None, None, None),
+    in_axes=(0, None, None, None, None, None, None, None, None, None),
 )
 
 compute_tau1_cube_vmap = jax.vmap(
@@ -476,24 +449,61 @@ compute_emission_height_cube_vmap = jax.vmap(
     in_axes=(0, None, None, None, None, None, None, None, None, None, None, None),
 )
 
+# The dust kernel expects a *scalar* frequency, so pmap over the device axis
+# must wrap an inner vmap over the per-device frequency axis.
 compute_spectral_cube_dust_pmap = jax.pmap(
-    compute_spectral_cube_with_dust,
+    jax.vmap(
+        compute_spectral_cube_with_dust,
+        in_axes=(0, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
+    ),
     axis_name="freq",
-    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None, None, None),
+    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
 )
 
 compute_spectral_cube_dust_vmap = jax.vmap(
     compute_spectral_cube_with_dust,
-    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None, None, None),
+    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
 )
+
+
+def compute_spectral_cube_dust_scan(
+    camera_freqs, gas_v, alpha_tot, n_up, n_dn,
+    a_ud, b_ud, b_du, ray_coords, obs_dir, nu0, pixel_area,
+    distance_pc, dust_alpha, dust_temp,
+):
+    """
+    Memory-efficient alternative to vmap: process one frequency channel at a time
+    using jax.lax.scan. Peak memory is O(H*W*N) instead of O(F*H*W*N).
+    Slower than vmap but avoids OOM on large cubes.
+    """
+    def scan_fn(_, freq):
+        image = compute_spectral_cube_with_dust(
+            freq, gas_v, alpha_tot, n_up, n_dn,
+            a_ud, b_ud, b_du, ray_coords, obs_dir, nu0, pixel_area,
+            distance_pc, dust_alpha, dust_temp,
+        )
+        return None, image
+
+    _, images = jax.lax.scan(scan_fn, None, camera_freqs)
+    return images
 
 
 
 __all__ = [
-    "einstein_coefficients",
-    "n_up_down",
     "compute_spectral_cube",
     "compute_spectral_cube_vmap",
     "compute_spectral_cube_pmap",
+    "compute_spectral_cube_with_dust",
+    "compute_spectral_cube_dust_vmap",
+    "compute_spectral_cube_dust_pmap",
+    "compute_spectral_cube_dust_scan",
+    "compute_tau1_cube",
+    "compute_tau1_cube_vmap",
+    "compute_tau1_cube_pmap",
+    "compute_emission_height_cube",
+    "compute_emission_height_cube_vmap",
+    "compute_emission_height_cube_pmap",
     "alpha_total",
+    "planck_nu",
+    "compute_dust_opacity",
 ]

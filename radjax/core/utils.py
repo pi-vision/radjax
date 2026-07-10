@@ -3,7 +3,7 @@ import numpy as np
 from astropy.io import fits
 
 def dump_yaml(data, path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
         yaml.safe_dump(data, f, sort_keys=False)
     print(f"✔️ Saved YAML → {path}")
@@ -138,7 +138,10 @@ def load_synthetic_observation(filepath):
         "nfreq": int(hdr.get("NFREQ", cube.shape[0] if cube is not None else len(freqs))),
         "npix":  int(hdr.get("NPIX", cube.shape[-1] if cube is not None else 0)),
         "sigma": (float(hdr["SIGMA"]) if "SIGMA" in hdr else None),
-        "nu0_hz": (float(hdr["NU0"]) if "NU0" in hdr else None),
+        "nu0_hz": (
+            float(hdr["NU0_HZ"]) if "NU0_HZ" in hdr
+            else (float(hdr["NU0"]) if "NU0" in hdr else None)
+        ),
         "noisegen": hdr.get("NOISEGEN", None),
         "seed": (int(hdr["SEED"]) if "SEED" in hdr else None),
         "header": hdr,
