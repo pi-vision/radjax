@@ -10,3 +10,6 @@ mcmc_output/*
 *.out
 *.err
 ._*
+*.pdf
+*.fits
+*.slurm
