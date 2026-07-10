@@ -75,6 +75,17 @@ def grid_visibilities(
     iu = jnp.searchsorted(edges, uu, side="right") - 1  # shape (nchan, nvis)
     iv = jnp.searchsorted(edges, vv, side="right") - 1  # shape (nchan, nvis)
 
+    # Baselines outside the uv grid must not alias back in: a negative index
+    # would wrap to the opposite edge under JAX scatter semantics, while an
+    # index == npix would be silently dropped. Zero their weights/data and
+    # clip the indices so they contribute nothing.
+    in_range = (iu >= 0) & (iu < npix) & (iv >= 0) & (iv < npix)
+    weight = jnp.where(in_range, weight, 0.0)
+    data_re = jnp.where(in_range, data_re, 0.0)
+    data_im = jnp.where(in_range, data_im, 0.0)
+    iu = jnp.clip(iu, 0, npix - 1)
+    iv = jnp.clip(iv, 0, npix - 1)
+
     # Grid the thermal weights into the uv-cells.
     def grid_weights(w, iu_ch, iv_ch):
         grid = jnp.zeros((npix, npix), dtype=w.dtype)
@@ -82,7 +93,9 @@ def grid_visibilities(
         return grid
     
     cell_weight = jax.vmap(grid_weights)(weight, iu, iv)  # shape (nchan, npix, npix)
-    sigma_binned = 1.0 / jnp.sqrt(cell_weight)
+    # Empty cells have zero weight; report sigma = 0 there instead of inf.
+    cell_weight_safe = jnp.where(cell_weight > 0, cell_weight, 1.0)
+    sigma_binned = jnp.where(cell_weight > 0, 1.0 / jnp.sqrt(cell_weight_safe), 0.0)
 
     # For each visibility, extract the total weight in its cell.
     def extract_cell_weight(grid, iu_ch, iv_ch):
@@ -117,11 +130,12 @@ def grid_visibilities(
     # Create a mask for cells that received any visibilities.
     mask = cell_weight > 0.0
 
-    # Apply an fftshift to the gridded outputs to get "ground" format.
-    vis_gridded = jnp.fft.fftshift(vis_gridded, axes=(-2, -1))
-    mask = jnp.fft.fftshift(mask, axes=(-2, -1))
-    sigma_binned = jnp.fft.fftshift(sigma_binned, axes=(-2, -1))
-    cell_weight = jnp.fft.fftshift(cell_weight, axes=(-2, -1))
+    # Centered (DC at npix//2) -> standard FFT order is ifftshift.
+    # (Identical to fftshift for even npix, off by one for odd npix.)
+    vis_gridded = jnp.fft.ifftshift(vis_gridded, axes=(-2, -1))
+    mask = jnp.fft.ifftshift(mask, axes=(-2, -1))
+    sigma_binned = jnp.fft.ifftshift(sigma_binned, axes=(-2, -1))
+    cell_weight = jnp.fft.ifftshift(cell_weight, axes=(-2, -1))
     
      # Transfer arrays from GPU to CPU.
     vis_gridded_cpu = jax.device_get(vis_gridded)
@@ -175,7 +189,10 @@ def image_to_gridded_visibility_cube(
     weight: jnp.ndarray,
     density_weight: jnp.ndarray,
     npix: int,
-    append_hermitian = False
+    # Default matches grid_visibilities/dirty_image_cube: the density_weight
+    # returned by grid_visibilities is already hermitian-doubled, so weight
+    # must be doubled here too or C is off by 2x.
+    append_hermitian = True
 ) -> jnp.ndarray:
     """
     Compute the gridded visibility cube from a dirty image cube.
@@ -255,8 +272,6 @@ def interpolate_grid_to_loose(vis_cube: jnp.ndarray, uu: jnp.ndarray, vv: jnp.nd
     Returns:
         A 2D array of shape (nchan, nvis) containing the interpolated (degridded) values.
     """
-    # Conversion: 1 arcsec = 1/3600 degrees, then to radians.
-    arcsec_to_rad = jnp.deg2rad(1/3600)
     image_pixel_rad = cell_size * arcsec_to_rad  # in radians
     
     # Compute uv cell (pixel) width (in wavelengths)

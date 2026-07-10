@@ -23,6 +23,7 @@ Conventions
 """
 
 from __future__ import annotations
+import math
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -229,7 +230,9 @@ def n_up_down(
     dummy = jnp.exp(-dendivk[None] / partition_temp[:, None]) * (
         energy_levels[1:, 2] / energy_levels[:-1, 2]
     )
-    partition_fn = energy_levels[0, 2] + jnp.sum(jnp.cumprod(dummy, axis=-1), axis=-1)
+    # cumprod telescopes to (g_i/g_0) * exp(-(E_i-E_0)/kT); multiply the whole
+    # bracket by g_0 so Z = sum_i g_i exp(-(E_i-E_0)/kT) also for g_0 != 1.
+    partition_fn = energy_levels[0, 2] * (1.0 + jnp.sum(jnp.cumprod(dummy, axis=-1), axis=-1))
     pfunc = jnp.interp(gas_t, partition_temp, partition_fn)
 
     # Identify up/down indices for chosen transition
@@ -252,14 +255,16 @@ class ChemistryParams:
     """
     Immutable container for line-selection & simple CO chemistry knobs.
     """
-    molecule: str
-    line_index: int
-    line_name: str
+    # Non-numeric / branch-selecting fields are static (pytree_node=False) so
+    # instances can be passed through jax.jit / vmap without tracing strings.
+    molecule: str = struct.field(pytree_node=False)
+    line_index: int = struct.field(pytree_node=False)
+    line_name: str = struct.field(pytree_node=False)
     co_abundance: float
     freezeout: float
     N_dissoc: float
-    N_desorp: Optional[float]  # <-- new optional field
-    molecular_table: str
+    N_desorp: Optional[float] = struct.field(pytree_node=False)
+    molecular_table: str = struct.field(pytree_node=False)
 
     def validate(self) -> "ChemistryParams":
         """Lightweight validation on creation."""
@@ -404,7 +409,13 @@ def co_abundance_profile(
     """
     warm = jnp.bitwise_and(temperature > freezeout, 0.706 * h2_N > N_dissoc)
 
-    if N_desorp is None or jnp.isinf(N_desorp):
+    # N_desorp must be a static (non-traced) value: it selects a code branch.
+    # Concrete inf disables the cold branch like None; math.isinf on a tracer
+    # would raise a ConcretizationTypeError, hence the isinstance guard.
+    no_desorp = N_desorp is None or (
+        isinstance(N_desorp, (int, float)) and math.isinf(float(N_desorp))
+    )
+    if no_desorp:
         cold = jnp.zeros_like(warm, dtype=bool)
     else:
         cold = jnp.bitwise_and(
@@ -420,4 +431,4 @@ def co_abundance_profile(
 # ----------------------------------------------------------------------------- #
 # Pre-jitted wrappers (same signatures; mark bools static where needed)
 # ----------------------------------------------------------------------------- #
-co_abundance_profile_jit    = jax.jit(co_abundance_profile, static_argnames=("freezeout", "co_abundance"))
+co_abundance_profile_jit    = jax.jit(co_abundance_profile, static_argnames=("freezeout", "co_abundance", "N_desorp"))

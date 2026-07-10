@@ -74,6 +74,8 @@ def spherical_vec_to_cartesian(vector: jnp.ndarray, coords: jnp.ndarray) -> jnp.
     sint = rho / jnp.clip(r, min=eps)
 
     v_phi, v_theta, v_r = vector[..., 0], vector[..., 1], vector[..., 2]
+    # e_r = (sint*cosp, sint*sinp, cost); e_theta = (cost*cosp, cost*sinp, -sint);
+    # e_phi = (-sinp, cosp, 0)  (theta measured from +z)
     dummy = sint * v_r + cost * v_theta
     vx = cosp * dummy - sinp * v_phi
     vy = sinp * dummy + cosp * v_phi

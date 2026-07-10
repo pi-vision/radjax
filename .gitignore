@@ -8,3 +8,4 @@ figures/*
 mcmc_output/*
 *.out
 *.err
+._*

@@ -62,7 +62,7 @@ nu0 = data_cube.nu0
 npix = data_cube.nxpix
 width_kms = (velocities[-1] - velocities[0]) / 1000.0
 delta_v_ms = velocities[1] - velocities[0]
-beam = data_cube.beams_per_pix * sensor.beam(data_cube.dpix, data_cube.bmaj, data_cube.bmin, data_cube.bpa)
+beam = data_cube.pix_per_beam * sensor.beam(data_cube.dpix, data_cube.bmaj, data_cube.bmin, data_cube.bpa)
 
 print(f'Using {len(freqs)} channels for cube of shape: {data.shape}')
 
