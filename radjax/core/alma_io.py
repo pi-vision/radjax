@@ -16,7 +16,13 @@ from typing import Optional, Union
 import numpy as np
 import jax.numpy as jnp
 
-from gofish import imagecube
+try:
+    # gofish is only needed to LOAD real ALMA cubes; import lazily so that
+    # `import radjax` works in environments without it (e.g. training envs
+    # that only want radjax.core.uv_noise).
+    from gofish import imagecube
+except ImportError:  # pragma: no cover
+    imagecube = None
 
 ArrayLike = Union[np.ndarray, jnp.ndarray]
 
@@ -66,6 +72,8 @@ def prepare_alma_cube(
     if imagecube_kwargs:
         ic_kwargs.update(imagecube_kwargs)
 
+    if imagecube is None:
+        raise ImportError("gofish is required to load ALMA cubes: pip install gofish")
     cube = imagecube(data_path, **ic_kwargs)
 
     # spectra & axes
