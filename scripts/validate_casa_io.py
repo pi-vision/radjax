@@ -24,7 +24,8 @@ if not args.gpu:
 
 import jax; jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
-from radjax.core.casa_io import read_ms, image_to_vis, chi2_vis, VisibilityData
+from radjax.core.casa_io import read_ms, VisibilityData
+from radjax.core.vis_forward_model import image_to_vis, chi2_vis
 from radjax.core import sensor
 from radjax.core import chemistry as chem
 from radjax.models.broken_power_law import disk_from_yaml, forward_model_with_rays

@@ -12,6 +12,8 @@ Core modules exposed at top level
 - sensor           : Ray geometry, sampling, and instrument model
 - visibilities     : Visibility-domain utilities
 - alma_io          : ALMA FITS/measurement set I/O helpers
+- casa_io          : CASA measurement set visibility I/O
+- vis_forward_model: NUFFT visibility-domain forward model + chi²
 - consts           : Physical constants
 - phys             : Physics utilities
 - chemistry        : Abundance / chemistry helpers
@@ -28,6 +30,7 @@ from .core import (
     visibilities,
     alma_io,
     casa_io,
+    vis_forward_model,
     consts,
     phys,
     chemistry,
@@ -50,6 +53,7 @@ __all__ = [
     "visibilities",
     "alma_io",
     "casa_io",
+    "vis_forward_model",
     "consts",
     "phys",
     "chemistry",

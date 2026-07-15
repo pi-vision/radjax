@@ -1,29 +1,40 @@
-# Visibility module context — radjax/core/casa_io.py
+# Visibility module context — radjax/core/casa_io.py + vis_forward_model.py
 
 Picked up from a multi-session thread. Everything below is the authoritative current state.
+
+Committed on `feature/vis` (pushed to `origin`).
 
 ---
 
 ## What exists
 
-### `radjax/core/casa_io.py` (new, untracked)
+I/O and forward model live in separate files — the forward model is
+format-agnostic and takes plain (uvw, freq) arrays, so it works with
+`VisibilityData` from any reader, not just `read_ms`.
 
-Full NUFFT-based visibility forward model. Key objects:
+### `radjax/core/casa_io.py`
+
+CASA MS I/O only. Key objects:
 
 ```python
 VisibilityData        # dataclass: uvw (nrows,3), data (nrows,nchan) complex64,
                       #   weight (nrows,nchan), freq (nchan,), flag (nrows,nchan)
 read_ms(ms_path)      # loads CASA MS → Stokes I (XX+YY)/2, zeros flagged weights
+```
+
+### `radjax/core/vis_forward_model.py`
+
+NUFFT-based visibility forward model. Key objects:
+
+```python
 image_to_vis(image_cube, uvw, freq, dpix_rad, eps=1e-6)  # NUFFT forward model
 chi2_vis(obs, vis_model)  # weighted chi²
 ```
 
-### `scripts/validate_casa_io.py` (new, untracked)
+### `scripts/validate_casa_io.py`
 
 Runs 4 sanity checks + end-to-end test. All PASS at ~4e-8 error.
 Saves figures to `/scratch/ondemand28/len/data/radjax/casa_io_validation/`.
-
-Neither file has been committed yet (user said no git for now).
 
 ---
 
@@ -132,8 +143,9 @@ bins = np.logspace(4, 7, 40)
 
 ## What is NOT done yet
 
+- [x] Commit `casa_io.py`, `__init__.py`, `validate_casa_io.py` — on `feature/vis`, pushed to `origin`
+- [x] Separate I/O (`casa_io.py`) from the forward model (`vis_forward_model.py`)
 - [ ] Add binned-variance / binned-chi² diagnostic to `validate_casa_io.py`
-- [ ] Commit `casa_io.py`, `__init__.py`, `radjax/CLAUDE.md`, `validate_casa_io.py`
 - [ ] Wire `image_to_vis` into MCMC (`scripts/mcmc_co_gaia.py`) — replace image-plane chi² with visibility chi²
 - [ ] Wire into neural field training (`scripts/gap_disk_nn_temp.py`) — replace FITS loss with MS loss
 - [ ] Read the MAPS MS WEIGHT_SPECTRUM column (per-channel weights) instead of WEIGHT (per-pol only) — may improve weight accuracy
