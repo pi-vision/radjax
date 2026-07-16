@@ -665,7 +665,106 @@ def plot_disk_profile_rz(
     ax.set_ylabel("z [au]")
 
     return fig, ax
-    
+
+
+def plot_disk_profile_rz_with_dust(
+    ax: plt.Axes,
+    r_disk: np.ndarray,
+    z_disk: np.ndarray,
+    nd_h2: np.ndarray,
+    temperature: np.ndarray,
+    co_nd: np.ndarray,
+    ring_radii: Union[float, Sequence[float]],
+    ring_widths: Union[float, Sequence[float]],
+    ring_thicknesses: Union[float, Sequence[float]],
+    temp_levels: Sequence[float] = (20, 40, 60, 80, 100, 120),
+    vmin: float = 3,
+    vmax: float = 10,
+    ring_color: str = "red",
+    ring_sigmas: Sequence[float] = (1.0, 2.0),
+) -> Tuple[plt.Figure, plt.Axes]:
+    """
+    Same as :func:`plot_disk_profile_rz`, plus red contours of one or more
+    Gaussian dust rings overlaid in the disk-frame (r, z) plane, so you can see
+    how each ring sits relative to the CO emitting surface and the temperature
+    structure.
+
+    The ring geometry matches :func:`radjax.core.dust.create_3d_dust_ring`
+    exactly: a ring centred at ``radius`` with radial std ``0.5*width`` and
+    vertical std ``0.5*thickness`` (``width``/``thickness`` are the 2-sigma
+    full extents). Contours are drawn at the requested ``ring_sigmas`` levels of
+    the ring density (default 1-sigma and 2-sigma envelopes).
+
+    Parameters
+    ----------
+    ax, r_disk, z_disk, nd_h2, temperature, co_nd, temp_levels, vmin, vmax
+        As in :func:`plot_disk_profile_rz`.
+    ring_radii, ring_widths, ring_thicknesses : float or sequence of float
+        Per-ring geometry [au]. Scalars describe a single ring; sequences (of
+        equal length) describe multiple rings drawn on the same axes. These are
+        the same values passed to ``dust.create_3d_dust_ring``
+        (``radius``, ``width``, ``thickness``).
+    ring_color : str
+        Contour colour for the dust rings.
+    ring_sigmas : sequence of float
+        Which Gaussian sigma envelopes to draw (default 1 and 2 sigma).
+
+    Returns
+    -------
+    fig, ax : (Figure, Axes)
+    """
+    # Guard against being handed a 3D axes (e.g. a leftover `ax` from
+    # plot_ray_bundle_3d / plot_dust_ring_3d): the divider colorbar below fails
+    # cryptically deep inside matplotlib otherwise. This is an r-z 2D plot.
+    if getattr(ax, "name", None) == "3d":
+        raise ValueError(
+            "plot_disk_profile_rz_with_dust needs a 2D axes, but got a 3D one. "
+            "Create a fresh axes first, e.g. `fig, ax = plt.subplots(figsize=(8, 3))`."
+        )
+
+    fig, ax = plot_disk_profile_rz(
+        ax, r_disk, z_disk, nd_h2, temperature, co_nd,
+        temp_levels=temp_levels, vmin=vmin, vmax=vmax,
+    )
+
+    radii = np.atleast_1d(np.asarray(ring_radii, dtype=float))
+    widths = np.atleast_1d(np.asarray(ring_widths, dtype=float))
+    thicknesses = np.atleast_1d(np.asarray(ring_thicknesses, dtype=float))
+    if not (len(radii) == len(widths) == len(thicknesses)):
+        raise ValueError(
+            "ring_radii, ring_widths, ring_thicknesses must have equal length "
+            f"(got {len(radii)}, {len(widths)}, {len(thicknesses)})."
+        )
+
+    # Ring density is normalised to peak 1, so sigma envelopes are fixed levels.
+    levels = sorted(float(np.exp(-0.5 * s * s)) for s in ring_sigmas)
+    r = np.asarray(r_disk)
+    z = np.asarray(z_disk)
+    # r_disk/z_disk may be 1D coordinate axes (as in plot_disk_profile_rz) or
+    # 2D meshes; build 2D (R, Z) either way to evaluate the ring density.
+    if r.ndim == 1 and z.ndim == 1:
+        R, Z = np.meshgrid(r, z)   # (len(z), len(r)), matching the 2D fields
+    else:
+        R, Z = r, z
+    proxy = None
+    for radius, width, thickness in zip(radii, widths, thicknesses):
+        sigma_r = 0.5 * width
+        sigma_z = 0.5 * thickness
+        density = (
+            np.exp(-0.5 * ((R - radius) / sigma_r) ** 2)
+            * np.exp(-0.5 * (Z / sigma_z) ** 2)
+        )
+        cs = ax.contour(r, z, density, levels=levels,
+                        colors=ring_color, linewidths=1.2, linestyles="--")
+        if cs.collections:
+            proxy = cs.legend_elements()[0][0]
+
+    if proxy is not None:
+        ax.legend([proxy], ["dust ring (1, 2$\\sigma$)"], loc="upper right", fontsize=9)
+
+    ax.set_title("Disk profile: density, temperature, and dust ring", fontsize=13)
+    return fig, ax
+
 
 __all__ = [
     "intensity_to_nchw",
@@ -674,4 +773,5 @@ __all__ = [
     "slider_frame_comparison",
     "animate_movies_synced",
     "plot_disk_profile_rz",
+    "plot_disk_profile_rz_with_dust",
 ]

@@ -30,6 +30,59 @@ from .consts import (
 
 
 
+def _segment_emission(j_nu: jnp.ndarray, a_nu: jnp.ndarray, ray_ds: jnp.ndarray):
+    """
+    Exact constant-property radiative transfer solution per ray segment.
+
+    For each segment the emissivity/extinction endpoints are combined into an
+    extinction-weighted source function
+        S_seg = (j1 + j2) / (a1 + a2)
+    and the segment's emergent contribution (before attenuation by material in
+    front of it) is the exact solution for a uniform slab:
+        contrib = S_seg * (1 - exp(-dtau)).
+
+    Why extinction-weighted instead of endpoint-interpolated (the previous
+    RADMC-3D-style second-order scheme): when a segment straddles a sharp
+    tau=1 surface, the observer-side endpoint sits in near-vacuum where
+    S = j/a is ~0/0, and any scheme that weights toward that endpoint in the
+    optically thick limit inherits a garbage source function — producing O(1)
+    banding/streaking that flips with the sub-segment phase of the sampling
+    grid. The extinction-weighted S_seg instead limits to j2/a2 = B(T) of the
+    dense side (temperature is smooth across the surface even though opacity
+    is not), making the emergent intensity insensitive to where the surface
+    sits within the segment. In smooth regions S_seg equals the midpoint
+    source function to O(ds^2), and for optically thin segments
+    contrib -> 0.5*(j1+j2)*ds (the trapezoid rule), so nothing is lost in the
+    line wings.
+
+    Parameters
+    ----------
+    j_nu, a_nu : jnp.ndarray
+        Emissivity and extinction at the sample points, shape (..., nray).
+        Ordering along the last axis must be observer-side first.
+    ray_ds : jnp.ndarray
+        Segment lengths [cm], shape (..., nray-1). Non-uniform spacing is fine.
+
+    Returns
+    -------
+    contrib : jnp.ndarray
+        Per-segment emitted intensity S_seg*(1-exp(-dtau)), shape (..., nray-1).
+    dtau : jnp.ndarray
+        Per-segment optical depth, shape (..., nray-1).
+    attenuation : jnp.ndarray
+        exp(-tau) accumulated between each segment and the observer,
+        shape (..., nray-1).
+    """
+    a_sum = a_nu[..., 1:] + a_nu[..., :-1]
+    dtau = 0.5 * a_sum * ray_ds
+    s_seg = (j_nu[..., 1:] + j_nu[..., :-1]) / (a_sum + 1e-30)
+    contrib = s_seg * (-jnp.expm1(-dtau))   # expm1 keeps the small-dtau limit exact
+
+    pad_width = [(0, 0)] * (dtau.ndim - 1) + [(1, 0)]
+    attenuation = jnp.exp(-jnp.cumsum(jnp.pad(dtau, pad_width), axis=-1))[..., :-1]
+    return contrib, dtau, attenuation
+
+
 def compute_spectral_cube(
     camera_freqs: jnp.ndarray,
     gas_v: jnp.ndarray,
@@ -78,8 +131,11 @@ def compute_spectral_cube(
 
     Notes
     -----
-    Second order integration of the source
-    More info: https://www.ita.uni-heidelberg.de/~dullemond/software/radmc-3d/manual_radmc3d/imagesspectra.html#sec-second-order
+    Per-segment integration uses the exact constant-property slab solution
+    with an extinction-weighted source function (see _segment_emission).
+    This replaced the RADMC-3D-style second-order endpoint interpolation,
+    which produced O(1) banding artifacts on segments straddling a sharp
+    tau=1 surface (near endpoint in vacuum => garbage source function).
     """
     # Compute doppler shift
     # obs_dir points toward the observer, so obs_dir·v > 0 means approaching
@@ -103,23 +159,8 @@ def compute_spectral_cube(
 
     # Ray trace through the volume to compute image intensities
     ray_ds = jnp.sqrt(jnp.sum(jnp.diff(ray_coords, axis=-2) ** 2, axis=-1))
-    dtau = 0.5 * (a_nu[...,1:] + a_nu[...,:-1]) * ray_ds
-
-    # First order interpolation of the source
-    source_1st = 0.5 * (j_nu[...,1:] + j_nu[...,:-1]) * ray_ds
-
-    # Second-order integration: I = beta * S_near + (1 - e^-dtau - beta) * S_far,
-    # with index :-1 the near (observer-side) end of each segment. In the optically
-    # thick limit beta -> 1 so the observer sees the near-side source function.
-    s_nu = j_nu / (a_nu + 1e-30)   # Radmc3d has +1e-99 but this results in nans
-    beta = (dtau - 1 + jnp.exp(-dtau)) / (dtau + 1e-30)
-    beta = jnp.where(dtau > 1e-6, beta, 0.5*dtau)
-    source_2nd = beta * s_nu[...,:-1] + (1 - jnp.exp(-dtau) - beta) * s_nu[...,1:]
-    source_2nd = jnp.where(source_2nd < source_1st, source_2nd, source_1st)
-
-    pad_width = [(0, 0)] * (dtau.ndim - 1) + [(1, 0)]
-    attenuation = jnp.exp(-jnp.cumsum(jnp.pad(dtau, pad_width), axis=-1))[...,:-1]
-    intensity = (source_2nd * attenuation).sum(axis=-1)
+    contrib, _, attenuation = _segment_emission(j_nu, a_nu, ray_ds)
+    intensity = (contrib * attenuation).sum(axis=-1)
 
     # Conversion from erg/s/cm²/Hz/sr to Jy/pixel
     image_fluxes_jy = pixel_area / (distance_pc * pc)**2 * 1e23 * intensity
@@ -195,20 +236,10 @@ def compute_spectral_cube_with_dust(
     j_tot = const * n_up * a_ud * line_profile + a_dust * planck_nu(camera_freqs, dust_temp)
     a_tot = const * (n_dn * b_du - n_up * b_ud) * line_profile + a_dust
 
-    # Ray tracing
+    # Ray tracing: exact constant-property segment solution (see _segment_emission)
     ray_ds = jnp.sqrt(jnp.sum(jnp.diff(ray_coords, axis=-2) ** 2, axis=-1))
-    dtau = 0.5 * (a_tot[..., 1:] + a_tot[..., :-1]) * ray_ds
-    source_1st = 0.5 * (j_tot[..., 1:] + j_tot[..., :-1]) * ray_ds
-
-    s_nu = j_tot / (a_tot + 1e-30)
-    beta = (dtau - 1 + jnp.exp(-dtau)) / (dtau + 1e-30)
-    beta = jnp.where(dtau > 1e-6, beta, 0.5 * dtau)
-    source_2nd = beta * s_nu[..., :-1] + (1 - jnp.exp(-dtau) - beta) * s_nu[..., 1:]
-    source_2nd = jnp.where(source_2nd < source_1st, source_2nd, source_1st)
-
-    pad_width = [(0, 0)] * (dtau.ndim - 1) + [(1, 0)]
-    attenuation = jnp.exp(-jnp.cumsum(jnp.pad(dtau, pad_width), axis=-1))[..., :-1]
-    intensity = (source_2nd * attenuation).sum(axis=-1)
+    contrib, _, attenuation = _segment_emission(j_tot, a_tot, ray_ds)
+    intensity = (contrib * attenuation).sum(axis=-1)
 
     return pixel_area / (distance_pc * pc)**2 * 1e23 * intensity
 
@@ -304,32 +335,24 @@ def compute_emission_height_cube(
 
     # Ray trace through the volume
     ray_ds = jnp.sqrt(jnp.sum(jnp.diff(ray_coords, axis=-2) ** 2, axis=-1))
-    dtau = 0.5 * (a_nu[...,1:] + a_nu[...,:-1]) * ray_ds
 
     z_raw = ray_coords[..., 2]
     is_forward = z_raw[0, 0, 0] > z_raw[0, 0, -1]
     # jnp.where instead of Python if/else so this is safe inside jax.lax.scan.
-    dtau  = jnp.where(is_forward, dtau,  jnp.flip(dtau,  axis=-1))
-    j_nu  = jnp.where(is_forward, j_nu,  jnp.flip(j_nu,  axis=-1))
-    a_nu  = jnp.where(is_forward, a_nu,  jnp.flip(a_nu,  axis=-1))
-    z_raw = jnp.where(is_forward, z_raw, jnp.flip(z_raw, axis=-1))
-    
+    ray_ds = jnp.where(is_forward, ray_ds, jnp.flip(ray_ds, axis=-1))
+    j_nu   = jnp.where(is_forward, j_nu,   jnp.flip(j_nu,   axis=-1))
+    a_nu   = jnp.where(is_forward, a_nu,   jnp.flip(a_nu,   axis=-1))
+    z_raw  = jnp.where(is_forward, z_raw,  jnp.flip(z_raw,  axis=-1))
+
     # Mid-point Z-coordinates for the segments
     z_mid = 0.5 * (z_raw[..., 1:] + z_raw[..., :-1])
 
-    # Second-order Source term (from your spectral cube function)
-    s_nu = j_nu / (a_nu + 1e-30)
-    beta = (dtau - 1 + jnp.exp(-dtau)) / (dtau + 1e-30)
-    beta = jnp.where(dtau > 1e-6, beta, 0.5*dtau)
-    source_term = beta * s_nu[...,:-1] + (1 - jnp.exp(-dtau) - beta) * s_nu[...,1:]
-
-    # Calculate Attenuation (e^-tau) along the ray
-    pad_width = [(0, 0)] * (dtau.ndim - 1) + [(1, 0)]
-    attenuation = jnp.exp(-jnp.cumsum(jnp.pad(dtau, pad_width), axis=-1))[...,:-1]
+    # Exact constant-property segment solution (see _segment_emission)
+    contrib, _, attenuation = _segment_emission(j_nu, a_nu, ray_ds)
 
     # Weighted contribution of each segment to the total intensity
     # Shape: (nfreq, npix, npix, nray-1)
-    emission_weight = source_term * attenuation
+    emission_weight = contrib * attenuation
     # Total intensity (the denominator)
     total_intensity = emission_weight.sum(axis=-1)
     # Weighted Z (the numerator)
@@ -398,13 +421,25 @@ def compute_tau1_cube(
     z_ordered    = jnp.where(is_forward, z_raw, jnp.flip(z_raw, axis=-1))
 
     tau_sum = jnp.cumsum(dtau_ordered, axis=-1)
-    # Find the FIRST point where tau >= 1
+    # Find the FIRST segment whose cumulative tau crosses 1
     mask = (tau_sum >= 1.0)
     # argmax returns the first index where mask is True
     first_tau_1_idx = jnp.argmax(mask, axis=-1)
 
-    # Map back to Z
-    z_surface = jnp.take_along_axis(z_ordered[None, ...], first_tau_1_idx[..., None] + 1, axis=-1).squeeze(-1)
+    # Sub-segment interpolation: locate where tau=1 falls WITHIN the crossing
+    # segment by linear interpolation in cumulative tau, instead of snapping
+    # to the far sample. The nearest-sample version quantised the surface to
+    # the ray sampling grid, producing staircased tau1 maps / masks whenever
+    # a segment's dtau was large (optically thick discs).
+    tau_after  = jnp.take_along_axis(tau_sum,      first_tau_1_idx[..., None], axis=-1).squeeze(-1)
+    dtau_seg   = jnp.take_along_axis(dtau_ordered, first_tau_1_idx[..., None], axis=-1).squeeze(-1)
+    tau_before = tau_after - dtau_seg
+    frac = jnp.clip((1.0 - tau_before) / (dtau_seg + 1e-30), 0.0, 1.0)
+
+    # Map back to Z: segment k runs from sample k (near) to sample k+1 (far)
+    z_near = jnp.take_along_axis(z_ordered[None, ...], first_tau_1_idx[..., None],     axis=-1).squeeze(-1)
+    z_far  = jnp.take_along_axis(z_ordered[None, ...], first_tau_1_idx[..., None] + 1, axis=-1).squeeze(-1)
+    z_surface = z_near + frac * (z_far - z_near)
 
     # Handle rays that never hit tau=1 (optically thin)
     has_reached_tau_1 = jnp.any(mask, axis=-1)

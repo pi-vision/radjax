@@ -933,6 +933,90 @@ def sample_symmetric_disk__along_rays(
     return nd_ray, temperature_ray, velocity_ray
 
 
+def resample_rays_importance(
+    rays: "RayBundle",
+    weight_ray: jnp.ndarray,          # (H, W, N) non-negative importance
+    uniform_fraction: float = 0.25,
+) -> "RayBundle":
+    """
+    Redistribute each ray's N samples along its straight line with local
+    density proportional to ``(1-f)*weight + f*uniform`` via inverse-CDF
+    resampling. Frequency-independent: call once per ray bundle, after a
+    cheap first field-sampling pass on uniform rays and before the RT.
+
+    Motivation: uniform sampling across the slab wastes most samples in
+    vacuum, so segments straddle the thin emitting layer of optically thick
+    lines. Weighting by e.g. the CO number density (optionally plus a dust
+    density term) concentrates the same sample budget where opacity changes,
+    shrinking segment inhomogeneity — the residual error source of the
+    segment-exact RT integrator (see line_rte._segment_emission).
+
+    Notes
+    -----
+    - Sample count, shapes, and near->far ordering are preserved, so all
+      downstream consumers (integrators, tau1/mask logic) work unchanged;
+      the integrators already handle non-uniform spacing via jnp.diff.
+    - Ray endpoints (slab faces) are preserved exactly.
+    - The CDF is made strictly monotonic with a tiny ramp so flat stretches
+      (vacuum) can never collapse two samples onto the same coordinate,
+      which would give sqrt(0) -> NaN *gradients* in the inference paths.
+    - Rays whose weight is identically zero degrade gracefully to uniform.
+    - The weight is assumed resolvable by the uniform first pass (true for
+      the CO layer / dust rings, whose thickness >> uniform sample spacing);
+      it is the sub-sample-scale tau transition that needs no resolving here,
+      because the integrator is exact per segment.
+
+    Parameters
+    ----------
+    rays : RayBundle
+        Bundle with coords_xyz (H, W, N, 3) along straight rays.
+    weight_ray : jnp.ndarray, shape (H, W, N)
+        Non-negative importance at the current (uniform) sample positions.
+    uniform_fraction : float
+        Fraction of the sampling budget kept uniform across the slab
+        (floor covering vacuum and any structure missing from the weight).
+
+    Returns
+    -------
+    RayBundle with resampled coords_xyz; all other fields unchanged.
+    """
+    coords = rays.coords_xyz                                  # (H, W, N, 3)
+    H, W, N = coords.shape[0], coords.shape[1], coords.shape[2]
+    flat = coords.reshape(H * W, N, 3)
+    # Sample PLACEMENT is a numerical-scheme choice, not a physical quantity:
+    # gradients of a render w.r.t. disc parameters must flow through the field
+    # values at the samples, not through where the samples sit. Stopping the
+    # gradient here removes that noisy path entirely and, with it, the NaN
+    # hazard from differentiating the guarded normalisations below.
+    w = jax.lax.stop_gradient(jnp.maximum(weight_ray.reshape(H * W, N), 0.0))
+
+    # Arc length along each ray
+    seg = jnp.sqrt(jnp.sum(jnp.diff(flat, axis=1) ** 2, axis=-1))          # (P, N-1)
+    zeros = jnp.zeros((H * W, 1), dtype=seg.dtype)
+    s = jnp.concatenate([zeros, jnp.cumsum(seg, axis=1)], axis=1)          # (P, N)
+    s_total = s[:, -1:]                                                    # (P, 1)
+
+    # Mixture of importance and uniform measures per segment
+    w_seg = 0.5 * (w[:, 1:] + w[:, :-1]) * seg                             # (P, N-1)
+    w_norm = w_seg / (jnp.sum(w_seg, axis=1, keepdims=True) + 1e-300)
+    u_norm = seg / (s_total + 1e-300)
+    m = (1.0 - uniform_fraction) * w_norm + uniform_fraction * u_norm
+
+    # CDF with strict-monotonicity ramp (see Notes), renormalised to [0, 1]
+    cdf = jnp.concatenate([zeros, jnp.cumsum(m, axis=1)], axis=1)          # (P, N)
+    cdf = cdf + jnp.arange(N, dtype=cdf.dtype) * 1e-12
+    cdf = cdf / cdf[:, -1:]
+
+    # Inverse transform at uniform quantiles (endpoints keep the slab faces)
+    q = jnp.linspace(0.0, 1.0, N, dtype=cdf.dtype)
+    new_s = jax.vmap(jnp.interp, in_axes=(None, 0, 0))(q, cdf, s)          # (P, N)
+
+    # Rebuild coordinates along the same straight line
+    unit_dir = (flat[:, -1, :] - flat[:, 0, :]) / (s_total + 1e-300)       # (P, 3)
+    new_flat = flat[:, :1, :] + unit_dir[:, None, :] * new_s[..., None]
+    return rays.replace(coords_xyz=new_flat.reshape(H, W, N, 3))
+
+
 # ----------------------------------------------------------------------------- #
 # Beam & convolution
 # ----------------------------------------------------------------------------- #
