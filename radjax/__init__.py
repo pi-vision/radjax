@@ -29,16 +29,20 @@ from .core import (
     sensor,
     visibilities,
     alma_io,
-    casa_io,
-    vis_forward_model,
     consts,
     phys,
     chemistry,
     inference,
+    network,
     parallel,
     utils,
     visualization,
 )
+
+try:
+    from .core import casa_io, vis_forward_model
+except ImportError:
+    pass  # requires radjax[vis]: pip install radjax[vis]
 
 from .models import broken_power_law
 
@@ -61,6 +65,7 @@ __all__ = [
     "parallel",
     "utils",
     "visualization",
+    "network",
 
     # Models
     "broken_power_law",

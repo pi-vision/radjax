@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Optional, Tuple
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -8,8 +8,8 @@ from flax import struct
 import yaml
 
 from ..core.utils import yaml_safe
-from .casa_io import VisibilityData
-from .vis_forward_model import chi2_vis
+if TYPE_CHECKING:
+    from .casa_io import VisibilityData
 
 Array = jnp.ndarray
 @struct.dataclass
@@ -177,6 +177,7 @@ def visibility_log_likelihood(obs: VisibilityData, vis_model: np.ndarray) -> flo
     ...     vis_model = image_to_vis(render(theta), vis.uvw, vis.freq, dpix_rad)
     ...     return lp + visibility_log_likelihood(vis, vis_model)
     """
+    from .vis_forward_model import chi2_vis  # optional dep: pip install radjax[vis]
     return -0.5 * chi2_vis(obs, vis_model)
 
 
@@ -209,6 +210,7 @@ def reduced_chi2_vis(obs: VisibilityData, vis_model: np.ndarray, n_params: int) 
     float
         chi^2_nu
     """
+    from .vis_forward_model import chi2_vis  # optional dep: pip install radjax[vis]
     chi2 = chi2_vis(obs, vis_model)
     n_complex = int(np.sum(obs.weight > 0))
     nu = 2 * n_complex - n_params

@@ -38,6 +38,7 @@ dependencies = [
 jax-cpu    = ["jax[cpu]>=0.4"]
 jax-cuda12 = ["jax[cuda12]>=0.4"]
 jax-metal  = ["jax[cpu]>=0.4", "jax-metal>=0.0.7"]
+vis        = ["jax-finufft", "casacore"]
 dev = ["pytest", "black", "isort", "sphinx", "myst-parser", "nbsphinx"]
 
 [tool.setuptools]

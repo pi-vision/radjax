@@ -44,7 +44,6 @@ from __future__ import annotations
 import numpy as np
 import jax
 import jax.numpy as jnp
-import jax_finufft
 
 from .casa_io import CC, VisibilityData
 
@@ -107,6 +106,7 @@ def image_to_vis(
         uu = jax.device_put(uu, _CPU_DEVICE)
         vv = jax.device_put(vv, _CPU_DEVICE)
 
+        import jax_finufft  # optional dep: pip install radjax[vis]
         vis_channels = []
         for c in range(nchan):
             # finufft type-2 with DC at (N//2, N//2), isign=-1:
