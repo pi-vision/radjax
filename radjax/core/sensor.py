@@ -51,9 +51,10 @@ class ObservationParams:
     """
     Observation / projection configuration.
 
-    Two mutually exclusive modes:
-    - REAL:     provide velocity_range=(vmin, vmax) [m/s] and vlsr [m/s]
-    - SYNTHETIC: provide velocity_width_kms [km/s] only (no vlsr, no velocity_range)
+    Three mutually exclusive modes:
+    - REAL:      provide velocity_range=(vmin, vmax) [m/s] and vlsr [m/s]  (FITS cube)
+    - SYNTHETIC: provide velocity_width_kms [km/s] only                     (synthetic cube)
+    - MS:        provide vlsr [m/s] only; channels come from the MS          (measurement set)
 
     Common fields:
       name:      dataset identifier
@@ -95,16 +96,22 @@ class ObservationParams:
                 raise ValueError("In SYNTHETIC mode, do not provide velocity_range or vlsr.")
             if self.velocity_width_kms <= 0:
                 raise ValueError("velocity_width_kms must be positive.")
-        else:
-            # REAL mode
-            if not (has_range and has_vlsr):
-                raise ValueError("In REAL mode, provide BOTH velocity_range (vmin, vmax) and vlsr.")
+        elif has_range and has_vlsr:
+            # REAL mode (FITS cube)
             vmin, vmax = self.velocity_range
             if not isinstance(vmin, (int, float)) or not isinstance(vmax, (int, float)):
                 raise TypeError("velocity_range must be a tuple of floats (vmin, vmax) in m/s.")
             if vmax <= vmin:
                 raise ValueError("velocity_range must satisfy vmax > vmin.")
-            # no constraint on sign of vlsr; it’s frame-dependent
+        elif has_vlsr and not has_range:
+            # MS mode: vlsr only, channels come from the measurement set
+            pass
+        else:
+            raise ValueError(
+                "Provide one of: (a) velocity_range + vlsr for FITS/REAL mode, "
+                "(b) velocity_width_kms for SYNTHETIC mode, "
+                "or (c) vlsr only for MS mode."
+            )
 
         # Basic sanity (shared)
         if self.distance <= 0:
@@ -122,8 +129,12 @@ class ObservationParams:
         return self.velocity_width_kms is not None
 
     @property
+    def is_ms(self) -> bool:
+        return self.vlsr is not None and self.velocity_range is None and self.velocity_width_kms is None
+
+    @property
     def is_real(self) -> bool:
-        return not self.is_synthetic
+        return self.velocity_range is not None
 
     # ---- convenience getters ----
     @property
@@ -359,11 +370,25 @@ def params_from_yaml(filename: str | Path) -> ObservationParams:
             posang=float(o["posang"]),
             z_width=float(o["z_width"]),
         )
+    elif "vlsr" in o:
+        # MS mode: channels come from the measurement set; only vlsr needed
+        return ObservationParams(
+            name=name,
+            distance=float(o["distance"]),
+            fov=float(o["fov"]),
+            vlsr=float(o["vlsr"]),
+            nray=int(o["nray"]),
+            incl=float(o["incl"]),
+            phi=float(o["phi"]),
+            posang=float(o["posang"]),
+            z_width=float(o["z_width"]),
+        )
     else:
         raise KeyError(
-            "Observation block must contain either "
-            "`velocity_range` + `vlsr` (REAL mode) "
-            "or `velocity_width_kms` (SYNTHETIC mode)."
+            "Observation block must contain one of: "
+            "(a) `velocity_range` + `vlsr` for FITS/REAL mode, "
+            "(b) `velocity_width_kms` for SYNTHETIC mode, "
+            "or (c) `vlsr` only for MS mode."
         )
 
 

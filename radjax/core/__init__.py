@@ -19,6 +19,11 @@ from . import (
     visualization,
 )
 
+try:
+    from . import casa_io, vis_forward_model
+except ImportError:
+    pass  # requires radjax[vis]: pip install radjax[vis]
+
 __all__ = [
     "line_rte",
     "grid",

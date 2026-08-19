@@ -12,6 +12,8 @@ Core modules exposed at top level
 - sensor           : Ray geometry, sampling, and instrument model
 - visibilities     : Visibility-domain utilities
 - alma_io          : ALMA FITS/measurement set I/O helpers
+- casa_io          : CASA measurement set visibility I/O
+- vis_forward_model: NUFFT visibility-domain forward model + chi²
 - consts           : Physical constants
 - phys             : Physics utilities
 - chemistry        : Abundance / chemistry helpers
@@ -31,10 +33,16 @@ from .core import (
     phys,
     chemistry,
     inference,
+    network,
     parallel,
     utils,
     visualization,
 )
+
+try:
+    from .core import casa_io, vis_forward_model
+except ImportError:
+    pass  # requires radjax[vis]: pip install radjax[vis]
 
 from .models import broken_power_law
 
@@ -48,6 +56,8 @@ __all__ = [
     "sensor",
     "visibilities",
     "alma_io",
+    "casa_io",
+    "vis_forward_model",
     "consts",
     "phys",
     "chemistry",
@@ -55,6 +65,7 @@ __all__ = [
     "parallel",
     "utils",
     "visualization",
+    "network",
 
     # Models
     "broken_power_law",
