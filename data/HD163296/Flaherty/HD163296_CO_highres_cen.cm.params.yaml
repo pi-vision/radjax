@@ -28,7 +28,7 @@ chemistry:
 # -----------------------------
 observation:
   distance: 122.0                       # [pc] source distance
-  fov: 11.0                             # [arcsec] field of view (image-plane extent)
+  fov: 10.0                             # [arcsec] field of view (image-plane extent)
 
   velocity_range:                       # [m/s] min/max velocity channels in the cube
     - 2000.0
@@ -66,6 +66,7 @@ disk:
 
   # Kinematics
   v_turb: 0.06                          # Dimensionless turbulence parameter (scales local sound speed)
+  rotation_flip: -1                     # -1 = CW in disk plane = CCW as observed on sky (HD163296 is CCW on sky)
 
   # Resolution / grid sampling (model grid)
   resolution: 500                       # radial grid resolution

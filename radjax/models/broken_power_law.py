@@ -131,6 +131,10 @@ class DiskParams:
     ring_densities: jnp.ndarray = dc.field(default_factory=lambda: jnp.empty(0))
     ring_heights: jnp.ndarray = dc.field(default_factory=lambda: jnp.empty(0))
 
+    # Rotation direction: +1 = CCW in disk plane, -1 = CW in disk plane.
+    # Disks described as "CCW on the sky" in ALMA papers (e.g. HD163296) need -1.
+    rotation_flip: float = 1.0
+
     def validate(self) -> "DiskParams":
         """Lightweight validation on creation."""
         if self.r_scale <= 0: raise ValueError("r_scale must be > 0")
@@ -144,7 +148,12 @@ class DiskParams:
 
 
 def disk_from_yaml(source: Union[str, Path, Dict[str, Any]]) -> DiskParams:
+    """
+    Load DiskParams from the `disk:` section of a YAML (or dict).
 
+    Unit conversions applied to `disk:`:
+      M_star, M_gas: [M_sun] → grams
+    """
     if isinstance(source, (str, Path)):
         with open(Path(source), "r") as f:
             cfg = yaml.safe_load(f) or {}
@@ -166,7 +175,7 @@ def disk_from_yaml(source: Union[str, Path, Dict[str, Any]]) -> DiskParams:
     float_keys = [
         "T_mid1","T_atm1","q","q_in","z_q0","delta",
         "r_scale","r_in","r_break","log_r_c","gamma",
-        "M_gas","M_star","v_turb","z_min","z_max","r_min","r_max",
+        "M_gas","M_star","v_turb","rotation_flip","z_min","z_max","r_min","r_max",
     ]
 
     for k in float_keys:
@@ -337,13 +346,14 @@ def co_disk_from_params(
         m_mol_h=m_mol_h,
     )
 
-    # --- azimuthal velocity
+    # --- azimuthal velocity; rotation_flip controls CW vs CCW in disk plane
     v_phi = phys.velocity_profile(
         z_mesh, r_mesh, h2_nd, temperature,
         M_star=disk_params.M_star,
         m_mol_h=m_mol_h,
         pressure_correction=pressure_correction,
     )
+    v_phi = v_phi * disk_params.rotation_flip
 
     # --- column density & CO abundance
     h2_N = phys.surface_density(z_mesh, h2_nd)  # [cm^-2]
@@ -371,6 +381,9 @@ def temperature_profile(z: jnp.ndarray, r: jnp.ndarray, params: DiskParams) -> j
     """
     Temperature T(z, r) with piecewise-q radial scaling and mid/atm blending.
 
+    Both inner (r <= r_break) and outer branches are anchored at r_scale, so
+    they are generally discontinuous at r_break (unless q_in == q).
+
     Parameters
     ----------
     z, r : jnp.ndarray
@@ -382,24 +395,61 @@ def temperature_profile(z: jnp.ndarray, r: jnp.ndarray, params: DiskParams) -> j
     -------
     jnp.ndarray
         Temperature [K] with shape broadcast(z, r).
+
+    See Also
+    --------
+    continuous_temperature_profile : variant that anchors the inner branch at
+        r_break so T is continuous across the break.
     """
-    # Guard r -> 0: keeps z_q finite and power laws bounded near the star.
     r_safe = jnp.maximum(r, 1e-3)
-    # Continuous broken power law: outer branch anchored at r_scale, inner
-    # branch anchored at r_break so T is continuous across the break.
+    q_eff = jnp.where(r_safe <= params.r_break, params.q_in, params.q)
+    T_mid = params.T_mid1 * (r_safe / params.r_scale) ** q_eff
+    T_atm = params.T_atm1 * (r_safe / params.r_scale) ** q_eff
+    z_q   = params.z_q0 * (r_safe / params.r_scale) ** 1.3
+    cos_arg = jnp.clip(jnp.pi * jnp.abs(z) / (2.0 * z_q), 0.0, 0.5 * jnp.pi)
+    return jnp.where(
+        jnp.abs(z) < z_q,
+        T_atm + (T_mid - T_atm) * jnp.cos(cos_arg) ** (2.0 * params.delta),
+        T_atm,
+    )
+
+
+def continuous_temperature_profile(z: jnp.ndarray, r: jnp.ndarray, params: DiskParams) -> jnp.ndarray:
+    """
+    Temperature T(z, r) — continuous broken power-law variant.
+
+    The inner branch is anchored at r_break rather than r_scale, so T is
+    continuous across the break:
+        r > r_break: T ∝ (r / r_scale)^q
+        r ≤ r_break: T ∝ (r_break / r_scale)^q × (r / r_break)^q_in
+
+    Parameters
+    ----------
+    z, r : jnp.ndarray
+        Height and radius grids [AU], broadcastable to a common shape.
+    params : DiskParams
+        Holds thermal/geometry/blending parameters.
+
+    Returns
+    -------
+    jnp.ndarray
+        Temperature [K] with shape broadcast(z, r).
+
+    See Also
+    --------
+    temperature_profile : the default (discontinuous) variant.
+    """
+    r_safe = jnp.maximum(r, 1e-3)
     scale_outer = (r_safe / params.r_scale) ** params.q
-    # Clamp r_break inside the power laws: r_break <= 0 (e.g. -1) disables the
-    # inner branch via the where-condition below, but an unclamped negative
-    # base to a fractional power is NaN in the *untaken* branch and would
-    # poison gradients.
+    # Clamp r_break: a non-positive r_break is physically meaningless but
+    # would produce NaN (negative base to fractional power) in the untaken
+    # where-branch, poisoning gradients.
     rb_safe = jnp.maximum(params.r_break, 1e-3)
     scale_inner = (rb_safe / params.r_scale) ** params.q * (r_safe / rb_safe) ** params.q_in
     radial_scale = jnp.where(r_safe <= params.r_break, scale_inner, scale_outer)
     T_mid = params.T_mid1 * radial_scale
     T_atm = params.T_atm1 * radial_scale
     z_q   = params.z_q0 * (r_safe / params.r_scale) ** 1.3
-    # Clip the cos argument to [0, pi/2] so the untaken where-branch stays
-    # finite (cos < 0 raised to a fractional power is NaN and poisons grads).
     cos_arg = jnp.clip(jnp.pi * jnp.abs(z) / (2.0 * z_q), 0.0, 0.5 * jnp.pi)
     return jnp.where(
         jnp.abs(z) < z_q,

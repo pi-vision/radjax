@@ -167,6 +167,67 @@ def compute_spectral_cube(
     return image_fluxes_jy
 
 
+def compute_spectral_cube_radmc3d(
+    camera_freqs: jnp.ndarray,
+    gas_v: jnp.ndarray,
+    alpha_tot: jnp.ndarray,
+    n_up: jnp.ndarray,
+    n_dn: jnp.ndarray,
+    a_ud: float,
+    b_ud: float,
+    b_du: float,
+    ray_coords: jnp.ndarray,
+    obs_dir: jnp.ndarray,
+    nu0: float,
+    pixel_area: float,
+    distance_pc: float,
+) -> jnp.ndarray:
+    """
+    Perform radiative transfer along rays using the RADMC-3D second-order scheme.
+
+    This is the original RADMC-3D-style second-order source function integration.
+    Use this when backward-compatibility with previous RADMC-3D runs is needed.
+    For new work, prefer ``compute_spectral_cube`` (segmented integrator) which
+    avoids banding artifacts near sharp opacity surfaces.
+
+    Parameters
+    ----------
+    Same as ``compute_spectral_cube``.
+
+    Returns
+    -------
+    jnp.ndarray
+        Image-plane fluxes; shape ``(nfreq, npix, npix)`` in Jy/pixel.
+
+    Notes
+    -----
+    Implements the second-order scheme from the RADMC-3D manual:
+    https://www.ita.uni-heidelberg.de/~dullemond/software/radmc-3d/manual_radmc3d/imagesspectra.html#sec-second-order
+    """
+    doppler = (1.0 / cc) * jnp.sum(obs_dir * gas_v, axis=-1)
+    dnu = expand_dims(camera_freqs, alpha_tot.ndim + 1, axis=-1) - nu0 - doppler * nu0
+    line_profile = (cc / (alpha_tot * nu0 * jnp.sqrt(jnp.pi))) * jnp.exp(
+        -(cc * dnu / (nu0 * alpha_tot)) ** 2
+    )
+    const = hh * nu0 / (4 * jnp.pi)
+    j_nu = const * n_up * a_ud * line_profile
+    a_nu = const * (n_dn * b_du - n_up * b_ud) * line_profile
+
+    ray_ds = jnp.sqrt(jnp.sum(jnp.diff(ray_coords, axis=-2) ** 2, axis=-1))
+    dtau = 0.5 * (a_nu[..., 1:] + a_nu[..., :-1]) * ray_ds
+    source_1st = 0.5 * (j_nu[..., 1:] + j_nu[..., :-1]) * ray_ds
+    s_nu = j_nu / (a_nu + 1e-30)
+    beta = (dtau - 1 + jnp.exp(-dtau)) / (dtau + 1e-30)
+    beta = jnp.where(dtau > 1e-6, beta, 0.5 * dtau)
+    source_2nd = (1 - jnp.exp(-dtau) - beta) * s_nu[..., :-1] + beta * s_nu[..., 1:]
+    source_2nd = jnp.where(source_2nd < source_1st, source_2nd, source_1st)
+    pad_width = [(0, 0)] * (dtau.ndim - 1) + [(1, 0)]
+    attenuation = jnp.exp(-jnp.cumsum(jnp.pad(dtau, pad_width), axis=-1))[..., :-1]
+    intensity = (source_2nd * attenuation).sum(axis=-1)
+    image_fluxes_jy = pixel_area / (distance_pc * pc) ** 2 * 1e23 * intensity
+    return image_fluxes_jy
+
+
 def planck_nu(nu, T):
     """Planck function B_nu(T) in erg/s/cm^2/Hz/sr."""
     exp_factor = (hh * nu) / (kk * T + 1e-30)
@@ -450,16 +511,28 @@ def compute_tau1_cube(
 # JIT wrappers & vectorized ops
 # ----------------------------------------------------------------------------- #
 
-# Parallelize over frequency axis across devices
+_CUBE_IN_AXES = (0, None, None, None, None, None, None, None, None, None, None, None, None)
+
+# Segmented integrator (default)
 compute_spectral_cube_pmap = jax.pmap(
     compute_spectral_cube,
     axis_name="freq",
-    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None, None),
+    in_axes=_CUBE_IN_AXES,
 )
-# Vectorize over frequency axis on a single device
 compute_spectral_cube_vmap = jax.vmap(
     compute_spectral_cube,
-    in_axes=(0, None, None, None, None, None, None, None, None, None, None, None, None),
+    in_axes=_CUBE_IN_AXES,
+)
+
+# RADMC-3D second-order integrator
+compute_spectral_cube_radmc3d_pmap = jax.pmap(
+    compute_spectral_cube_radmc3d,
+    axis_name="freq",
+    in_axes=_CUBE_IN_AXES,
+)
+compute_spectral_cube_radmc3d_vmap = jax.vmap(
+    compute_spectral_cube_radmc3d,
+    in_axes=_CUBE_IN_AXES,
 )
 
 compute_tau1_cube_pmap = jax.pmap(
@@ -528,6 +601,9 @@ __all__ = [
     "compute_spectral_cube",
     "compute_spectral_cube_vmap",
     "compute_spectral_cube_pmap",
+    "compute_spectral_cube_radmc3d",
+    "compute_spectral_cube_radmc3d_vmap",
+    "compute_spectral_cube_radmc3d_pmap",
     "compute_spectral_cube_with_dust",
     "compute_spectral_cube_dust_vmap",
     "compute_spectral_cube_dust_pmap",

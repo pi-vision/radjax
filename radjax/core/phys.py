@@ -25,8 +25,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-# constants module must define: G [cgs], au [cm], kk [erg/K], m_h2 [g]
-from .consts import G, au, kk, m_h2
+# constants module must define: G [cgs], au [cm], kk [erg/K], m_mol_h [g]
+from .consts import G, au, kk, m_mol_h
 
 
 # ----------------------------------------------------------------------------- #
@@ -131,7 +131,7 @@ def number_density_profile(
     half_column = jnp.sum(0.5 * (rho[1:] + rho[:-1]) * dz, axis=0, keepdims=True)
     rho     = 0.5 * sigma * rho / half_column
     # Mass density -> H2 number density (X_CO is defined relative to H2)
-    return rho / m_h2
+    return rho / m_mol_h
 
 
 def surface_density(z: jnp.ndarray, nd: jnp.ndarray) -> jnp.ndarray:
@@ -236,9 +236,13 @@ def azimuthal_velocity(
 
     Notes
     -----
-    Pure rotation about +z: v = v_phi * (-y, x, 0) / r (CCW seen from +z).
-    This sign choice keeps the y-component identical to the previous
-    implementation, so rendered cubes at phi = 0 are unchanged.
+    Coordinate convention: coords[...,0] = North (y_sky), coords[...,1] = East (x_sky).
+    Positive v_phi produces CCW rotation in the mathematical (comp0, comp1) plane:
+    at the North position, gas moves in the +East direction.
+    Pass negative v_phi (e.g. via rotation_flip=-1 in DiskParams) to reverse the
+    rotation direction.  Empirically, disks described as "CCW on the sky" in
+    astronomical papers (e.g. HD163296) require v_phi < 0 when using the positive
+    Doppler sign convention (approaching gas = blueshifted).
     """
     ray_r = jnp.sqrt(coords[..., 0] ** 2 + coords[..., 1] ** 2)
     ray_r = jnp.where(ray_r == 0.0, 1.0, ray_r)  # avoid NaNs at r=0

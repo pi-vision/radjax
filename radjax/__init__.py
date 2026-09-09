@@ -50,16 +50,24 @@ from .core import dust
 __version__ = "0.1.0"
 
 __all__ = [
+    # Core
     "line_rte",
     "grid",
     "sensor",
-    "chemistry",
-    "phys",
-    "visualization",
+    "visibilities",
     "alma_io",
-    "dust",
+    "casa_io",
+    "vis_forward_model",
+    "consts",
+    "phys",
+    "chemistry",
+    "inference",
     "parallel",
     "utils",
-    "inference",
+    "visualization",
+    "network",
+    "dust",
+
+    # Models
     "broken_power_law",
 ]

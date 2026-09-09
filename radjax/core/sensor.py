@@ -251,14 +251,14 @@ def rays_alma_projection(
 ) -> "RayBundle":
     """
     Construct pinhole rays through a finite-thickness disk slab and return a RayBundle.
-    Always uses the provided FOV (arcsec) to compute a constant pixel_area (sr).
+    Always uses the provided FOV (arcsec) to compute a constant pixel_area (cm²).
 
     Returns
     -------
     RayBundle with:
       - nx, ny: int
       - coords_xyz: (ny, nx, nray, 3) world-space samples along each ray (near → far, index 0 = top/near, index N-1 = bottom/far)
-      - pixel_area: (ny, nx) constant map of pixel area in cm^2
+      - pixel_area: (ny, nx) constant map of pixel physical area in cm²
       - obs_dir:    (3,) unit LOS in world coordinates after (incl, phi)
     """
     # ---- inputs & shapes
@@ -305,9 +305,9 @@ def rays_alma_projection(
     ray_coords = jnp.linspace(ray_start, ray_stop, nray, axis=1)  # (ny*nx, nray, 3)
     ray_coords = ray_coords.reshape(ny, nx, nray, 3)
 
-    # ---- pixel solid angle [sr], distance-independent
+    # ---- pixel physical area [cm²] at the source plane
     fov_rad    = fov_as * arcsec
-    pixel_area = (2.0 * jnp.tan(fov_rad / 2.0) / float(npix)) ** 2
+    pixel_area = (d_cm * 2.0 * jnp.tan(fov_rad / 2.0) / float(npix)) ** 2
 
     rays = RayBundle(
         nx=nx,
@@ -342,14 +342,26 @@ def rays_from_params(
     return rays_alma_projection_jit(
         jnp.asarray(x_sky),
         jnp.asarray(y_sky),
-        obs_params.distance,
-        obs_params.nray,
-        obs_params.incl,
-        obs_params.phi,
-        obs_params.posang,
-        obs_params.z_width,
-        obs_params.fov,
+        float(obs_params.distance),
+        int(obs_params.nray),
+        float(obs_params.incl),
+        float(obs_params.phi),
+        float(obs_params.posang),
+        float(obs_params.z_width),
+        float(obs_params.fov),
     )
+
+
+def rotate_rays(
+    rays_base: RayBundle,
+    *,
+    incl_deg: float,
+    phi_deg: float,
+    posang_deg: float,
+):
+    """
+    Rotate a canonical RayBundle by new viewing angles without changing the
+    underlying sampling (FOV, distance, ``nray``, or ``z_width``).
 
     Parameters
     ----------
@@ -370,13 +382,11 @@ def rays_from_params(
 
     Notes
     -----
-    - The base coordinates are assumed to be in world space for some reference
-      angles.
     - Rotations follow the same convention as :func:`rays_alma_projection`:
-      
-      * ``obs_dir = rotate([0,0,1], incl, phi)``  
-      * ``coords  = rotate(coords, incl, -phi)``  
-      * ``coords  = rotate_about(obs_dir, coords, -posang)``  
+
+      * ``obs_dir = rotate([0,0,1], incl, phi)``
+      * ``coords  = rotate(coords, incl, -phi)``
+      * ``coords  = rotate_about(obs_dir, coords, -posang)``
 
     Use this when inclination or position angle are part of the parameter
     vector ``θ``, but the overall camera grid (distance, FOV, ``nray``, ``z_width``)
@@ -570,26 +580,19 @@ def print_params(params: "ObservationParams") -> None:
 # ----------------------------------------------------------------------------- #
 def compute_camera_freqs(
     num_freqs: int,
-    half_width_kms: float = None,
-    nu0: float = None,
+    width_kms: float,
+    nu0: float,
     v_sys: float = 0.0,
     num_subfreq: int = 1,
     subfreq_width: Optional[float] = None,
-    width_kms: Optional[float] = None,  # deprecated alias for half_width_kms
 ) -> jnp.ndarray:
     """
     Build a (possibly sub-sampled) frequency grid around line center.
 
-    Channels span velocities in [-half_width_kms, +half_width_kms] (i.e. the
-    TOTAL velocity coverage is 2 * half_width_kms). `width_kms` is accepted as
-    a deprecated alias with the same half-width meaning.
+    Channels span velocities in [-width_kms, +width_kms] (total coverage 2 * width_kms).
     """
-    if half_width_kms is None:
-        half_width_kms = width_kms
-    if half_width_kms is None or nu0 is None:
-        raise TypeError("compute_camera_freqs requires half_width_kms and nu0.")
     # Doppler offsets: radio convention, v positive = receding = lower frequency
-    v = (2 * jnp.arange(num_freqs) / (num_freqs - 1) - 1.0) * half_width_kms  # km/s
+    v = (2 * jnp.arange(num_freqs) / (num_freqs - 1) - 1.0) * width_kms  # km/s
     camera_freqs = nu0 * (1.0 - (v_sys * 1e5) / cc - (v * 1e5) / cc)
 
     if num_subfreq > 1:
@@ -616,6 +619,7 @@ def render_cube(
     v_turb: float,
     mol: "MolecularData",
     backend: str = "vmap",         # {"vmap", "pmap", "none"}
+    rt_mode: str = "radmc3d_secondord",  # {"radmc3d_secondord", "segmented"}
 ) -> jnp.ndarray:
     """
     Render I(ν, y, x) using pre-sampled ray fields and line data in `mol`.
@@ -630,7 +634,7 @@ def render_cube(
         Temperature along rays [K].
     velocity_ray : (H, W, N, 3)
         3D velocity vectors along rays.
-    nu0: float, 
+    nu0: float,
         Central frequency, e.g. from alma_cube.nu0
     freqs : (F,)
         Frequency channels [Hz].
@@ -643,6 +647,10 @@ def render_cube(
           - "vmap" : run vectorized over frequency (default, usually fastest single-device)
           - "pmap" : parallelize across multiple devices (if available)
           - "none" : plain per-frequency loop (slow, but simplest)
+    rt_mode : {"radmc3d_secondord", "segmented"}, default="radmc3d_secondord"
+        Which RT integrator to use:
+          - "radmc3d_secondord" : RADMC-3D second-order source function interpolation
+          - "segmented" : exact constant-property slab solution (avoids banding near sharp surfaces)
 
     Returns
     -------
@@ -661,15 +669,27 @@ def render_cube(
     # Line opacity
     alpha_tot = line_rte.alpha_total(v_turb, temperature_ray)
 
+    # Select integrator
+    if rt_mode == "radmc3d_secondord":
+        _base = line_rte.compute_spectral_cube_radmc3d
+        _vmap = line_rte.compute_spectral_cube_radmc3d_vmap
+        _pmap = line_rte.compute_spectral_cube_radmc3d_pmap
+    elif rt_mode == "segmented":
+        _base = line_rte.compute_spectral_cube
+        _vmap = line_rte.compute_spectral_cube_vmap
+        _pmap = line_rte.compute_spectral_cube_pmap
+    else:
+        raise ValueError(f"Unknown rt_mode={rt_mode!r}. Must be 'radmc3d_secondord' or 'segmented'.")
+
     # Choose backend
     nfreq = freqs.shape[0]
     if backend == "pmap":
-        compute_fn = line_rte.compute_spectral_cube_pmap
+        compute_fn = _pmap
         freqs = shard_with_padding(freqs)  # (ndev, F_per_dev)
     elif backend == "vmap":
-        compute_fn = line_rte.compute_spectral_cube_vmap
+        compute_fn = _vmap
     elif backend == "none":
-        compute_fn = line_rte.compute_spectral_cube
+        compute_fn = _base
     else:
         raise ValueError(f"Unknown backend={backend!r}. Must be 'vmap', 'pmap', or 'none'.")
 
@@ -679,7 +699,7 @@ def render_cube(
         rays.coords_xyz, rays.obs_dir, nu0, rays.pixel_area, rays.distance_pc
     )
     images = jnp.clip(jnp.nan_to_num(images).reshape(-1, rays.ny, rays.nx)[:nfreq], 0.0)
-    
+
     return images
 
 
