@@ -211,7 +211,7 @@ def vsq_pressure_grad(
     P   = nd * kk * temperature
     dP  = (P[:, 1:] - P[:, :-1]) / dr
     dP  = jnp.pad(dP, pad_width=[(0, 0), (1, 0)])
-    return ((r * au) / rho) * dP
+    return dP / rho * (r * au)
 
 
 def azimuthal_velocity(
@@ -240,9 +240,11 @@ def azimuthal_velocity(
     Positive v_phi produces CCW rotation in the mathematical (comp0, comp1) plane:
     at the North position, gas moves in the +East direction.
     Pass negative v_phi (e.g. via rotation_flip=-1 in DiskParams) to reverse the
-    rotation direction.  Empirically, disks described as "CCW on the sky" in
-    astronomical papers (e.g. HD163296) require v_phi < 0 when using the positive
-    Doppler sign convention (approaching gas = blueshifted).
+    rotation direction.  The Doppler sign in line_rte is
+    doppler = -(obs_dir . v) / c; with that convention and the default
+    rotation_flip=1, the sky orientation is set by posang alone (see
+    sensor.ObservationParams).  Use rotation_flip=-1 only for a disk whose
+    rotation sense is opposite to that default.
     """
     ray_r = jnp.sqrt(coords[..., 0] ** 2 + coords[..., 1] ** 2)
     ray_r = jnp.where(ray_r == 0.0, 1.0, ray_r)  # avoid NaNs at r=0

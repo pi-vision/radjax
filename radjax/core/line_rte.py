@@ -138,9 +138,12 @@ def compute_spectral_cube(
     tau=1 surface (near endpoint in vacuum => garbage source function).
     """
     # Compute doppler shift
-    # obs_dir points toward the observer, so obs_dir·v > 0 means approaching
-    # gas, which must appear blueshifted: nu_peak = nu0 * (1 + v_los/c).
-    doppler = (1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
+    # Sign convention (shared by every integrator in this module):
+    #   doppler = -(obs_dir . v) / c, so the line peaks at nu0 * (1 - obs_dir.v / c).
+    # obs_dir is RayBundle.obs_dir, the *kinematic* LOS from
+    # sensor.rays_alma_projection (x,y scaled by sign(incl)). This sign is paired
+    # with the model's +CCW rotation (rotation_flip = 1 default).
+    doppler = -(1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
 
     # Define a vector line profile over multiple camera frequencies
     # The line profile is a Gaussian with width (alpha) and shifted by doppler
@@ -204,7 +207,7 @@ def compute_spectral_cube_radmc3d(
     Implements the second-order scheme from the RADMC-3D manual:
     https://www.ita.uni-heidelberg.de/~dullemond/software/radmc-3d/manual_radmc3d/imagesspectra.html#sec-second-order
     """
-    doppler = (1.0 / cc) * jnp.sum(obs_dir * gas_v, axis=-1)
+    doppler = -(1.0 / cc) * jnp.sum(obs_dir * gas_v, axis=-1)
     dnu = expand_dims(camera_freqs, alpha_tot.ndim + 1, axis=-1) - nu0 - doppler * nu0
     line_profile = (cc / (alpha_tot * nu0 * jnp.sqrt(jnp.pi))) * jnp.exp(
         -(cc * dnu / (nu0 * alpha_tot)) ** 2
@@ -279,8 +282,8 @@ def compute_spectral_cube_with_dust(
     # Avoid storing separate gas/dust intermediates — compute j_tot and a_tot directly
     # to minimize peak memory when all frequency channels are materialized simultaneously.
 
-    # Gas line profile (doppler shift along LOS; approaching gas is blueshifted)
-    doppler = (1.0 / cc) * jnp.sum(obs_dir * gas_v, axis=-1)
+    # Gas line profile (doppler shift along LOS; sign convention as in compute_spectral_cube)
+    doppler = -(1.0 / cc) * jnp.sum(obs_dir * gas_v, axis=-1)
     dnu = camera_freqs - nu0 - doppler * nu0
     line_profile = (cc / (alpha_tot * nu0 * jnp.sqrt(jnp.pi))) * jnp.exp(
         -(cc * dnu / (nu0 * alpha_tot)) ** 2
@@ -376,8 +379,8 @@ def compute_emission_height_cube(
     cutoff : float
         Minimum intensity cutoff to consider a pixel valid (not background diffusion)
     """
-        # Compute doppler shift (approaching gas is blueshifted)
-    doppler = (1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
+    # Compute doppler shift (sign convention as in compute_spectral_cube)
+    doppler = - (1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
 
     # Define a vector line profile over multiple camera frequencies 
     # The line profile is a Gaussian with width (alpha) and shifted by doppler
@@ -458,7 +461,7 @@ def compute_tau1_cube(
         Line rest frequency.
     """
 
-    doppler = (1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
+    doppler = - (1.0/cc) * jnp.sum(obs_dir * gas_v, axis=-1)
     dnu = expand_dims(camera_freqs, alpha_tot.ndim + 1, axis=-1) - nu0 - doppler * nu0
     line_profile = (cc / (alpha_tot * nu0 * jnp.sqrt(jnp.pi))) * jnp.exp(
         -(cc * dnu / (nu0 * alpha_tot)) ** 2
