@@ -33,11 +33,13 @@ relative, consistent with finite-difference step size). The difference is that
 jax-finufft registers this as a proper JAX primitive with custom_vjp rules, so
 `jax.grad` can trace through it -- required for gradient-based neural temperature
 recovery (radjax/core/neural.py's train_step), unlike plain `finufft` which
-operates on numpy arrays and is opaque to JAX autodiff. This currently installed
-build of jax-finufft has no GPU (cufinufft) backend, only CPU, so this function
-explicitly runs on the CPU device via `jax.default_device` -- the same place the
-NUFFT step already ran before (finufft is numpy/CPU-only too), so this is not a
-new performance regression, just now differentiable.
+operates on numpy arrays and is opaque to JAX autodiff.
+
+Device: the NUFFT dispatches to jax-finufft's GPU (cuFINUFFT) or CPU backend
+based on where the input arrays live, which defaults to JAX's default device.
+With a CUDA-enabled jax-finufft build installed that is the GPU; with the
+CPU-only PyPI build it is the CPU. Pass `device=` to `image_to_vis` to force a
+specific device.
 """
 from __future__ import annotations
 
@@ -47,8 +49,6 @@ import jax.numpy as jnp
 
 from .casa_io import CC, VisibilityData
 
-_CPU_DEVICE = jax.devices("cpu")[0]
-
 
 def image_to_vis(
     image_cube,
@@ -56,6 +56,7 @@ def image_to_vis(
     freq: np.ndarray,
     dpix_rad: float,
     eps: float = 1e-6,
+    device=None,
 ) -> jnp.ndarray:
     """
     Compute model visibilities from an image cube using finufft type-2 (NUFFT).
@@ -86,11 +87,16 @@ def image_to_vis(
         Image pixel size [rad].
     eps : float
         NUFFT accuracy tolerance (default 1e-6).
+    device : jax.Device, optional
+        Device to run the NUFFT on. Default (None) leaves the arrays on JAX's
+        default device -- the GPU when a CUDA-enabled jax-finufft build is
+        installed, otherwise the CPU. Pass e.g. ``jax.devices("cpu")[0]`` to
+        force CPU.
 
     Returns
     -------
     vis_model : (nrows, nchan) complex128 JAX array
-        Model visibilities in Jy, on the CPU device (see module docstring).
+        Model visibilities in Jy, on the selected device (see ``device``).
     """
     nchan = image_cube.shape[0]
 
@@ -101,26 +107,29 @@ def image_to_vis(
 
     image_cube = jnp.asarray(image_cube).astype(jnp.complex128)
 
-    with jax.default_device(_CPU_DEVICE):
-        image_cube = jax.device_put(image_cube, _CPU_DEVICE)
-        uu = jax.device_put(uu, _CPU_DEVICE)
-        vv = jax.device_put(vv, _CPU_DEVICE)
+    # Place inputs on the requested device; None keeps JAX's default device
+    # (the GPU when a CUDA-enabled jax-finufft build is installed). jax-finufft
+    # dispatches to its GPU or CPU backend based on where these arrays live.
+    if device is not None:
+        image_cube = jax.device_put(image_cube, device)
+        uu = jax.device_put(uu, device)
+        vv = jax.device_put(vv, device)
 
-        import jax_finufft  # optional dep: pip install radjax[vis]
-        vis_channels = []
-        for c in range(nchan):
-            # finufft type-2 with DC at (N//2, N//2), isign=-1:
-            #   out[j] = sum_{k1,k2} f[k1+N/2, k2+N/2] * exp(-i*(x[j]*k1 + y[j]*k2))
-            # Image convention (FITS / gofish): increasing row = North (+m), increasing col = West (-l).
-            # East is at col=0 (left), West at col=N-1 (right) — CDELT_RA < 0.
-            # Standard radio FT: V(u,v) = F * exp(-2πi*(u*l + v*m))
-            # With k2 = col - N/2 and l = -(k2)*dpix (West = +col → negative RA):
-            #   x[j] = 2π*v*dpix  (Dec/row, positive North)
-            #   y[j] = -2π*u*dpix (RA/col, negated because increasing col = West = -RA)
-            x = ( vv[:, c] * scale).astype(jnp.float64)
-            y = (-uu[:, c] * scale).astype(jnp.float64)
-            vis_channels.append(jax_finufft.nufft2(image_cube[c], x, y, iflag=-1, eps=eps))
-        vis_model = jnp.stack(vis_channels, axis=1)   # (nrows, nchan)
+    import jax_finufft  # optional dep: pip install radjax[vis]
+    vis_channels = []
+    for c in range(nchan):
+        # finufft type-2 with DC at (N//2, N//2), isign=-1:
+        #   out[j] = sum_{k1,k2} f[k1+N/2, k2+N/2] * exp(-i*(x[j]*k1 + y[j]*k2))
+        # Image convention (FITS / gofish): increasing row = North (+m), increasing col = West (-l).
+        # East is at col=0 (left), West at col=N-1 (right) — CDELT_RA < 0.
+        # Standard radio FT: V(u,v) = F * exp(-2πi*(u*l + v*m))
+        # With k2 = col - N/2 and l = -(k2)*dpix (West = +col → negative RA):
+        #   x[j] = 2π*v*dpix  (Dec/row, positive North)
+        #   y[j] = -2π*u*dpix (RA/col, negated because increasing col = West = -RA)
+        x = ( vv[:, c] * scale).astype(jnp.float64)
+        y = (-uu[:, c] * scale).astype(jnp.float64)
+        vis_channels.append(jax_finufft.nufft2(image_cube[c], x, y, iflag=-1, eps=eps))
+    vis_model = jnp.stack(vis_channels, axis=1)   # (nrows, nchan)
 
     return vis_model
 
@@ -156,12 +165,14 @@ def chi2_vis(
     """
     data, weight = obs.data, obs.weight
     if isinstance(vis_model, jax.Array) and not isinstance(vis_model, jax.core.Tracer):
-        # image_to_vis's output is CPU-resident (jax-finufft has no GPU backend yet).
-        # obs.data/weight are plain numpy and would otherwise get implicitly placed on
-        # JAX's default device (GPU) the moment they touch a jnp op below, causing a
-        # "Received incompatible devices" error on this subtraction. Under an active
-        # jax.grad/jit trace, vis_model is a Tracer (no concrete .devices()) and XLA
-        # handles any needed transfer itself, so this only applies to eager calls.
+        # Align obs.data/weight (plain numpy) onto whatever device vis_model
+        # lives on -- CPU or GPU, depending on the jax-finufft build and the
+        # `device` passed to image_to_vis. Otherwise the numpy inputs get
+        # implicitly placed on JAX's default device the moment they touch a jnp
+        # op below, which can trigger a "Received incompatible devices" error on
+        # the subtraction. Under an active jax.grad/jit trace, vis_model is a
+        # Tracer (no concrete .devices()) and XLA handles transfers itself, so
+        # this only applies to eager calls.
         target_device = next(iter(vis_model.devices()))
         data = jax.device_put(data, target_device)
         weight = jax.device_put(weight, target_device)
