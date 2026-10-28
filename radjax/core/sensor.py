@@ -41,8 +41,8 @@ ArrayLike = Union[jnp.ndarray, jnp.ndarray]
 # ----------------------------------------------------------------------------- #
 @struct.dataclass
 class RayBundle:
-    nx: int
-    ny: int
+    nx: int = struct.field(pytree_node=False)
+    ny: int = struct.field(pytree_node=False)
     coords_xyz: jnp.ndarray   # (H, W, N, 3), world XYZ along each ray
     pixel_area: jnp.ndarray   # (H, W), projected pixel area in cm^2 at the source plane
     obs_dir: jnp.ndarray      # (3,), unit vector from source to observer
@@ -118,10 +118,14 @@ class ObservationParams:
             )
 
         # Basic sanity (shared)
-        # Ray sampling starts at z = +z_width/2, which is only the observer-near
-        # side for incl < 90 deg; the RT attenuation ordering assumes this.
-        if not (0.0 <= self.incl < 90.0):
-            raise ValueError("incl must be in [0, 90) degrees (attenuation ordering assumes the observer is above the midplane).")
+        # Ray sampling starts at z = +z_width/2 and the RT attenuation ordering
+        # only depends on cos(incl), which is sign-invariant, so |incl| < 90 is
+        # the actual constraint. The sign of incl only selects which azimuthal
+        # side is tilted toward the observer (see obs_dir_kinematic in
+        # rays_alma_projection); use abs(incl) when comparing against
+        # continuum-derived inclinations.
+        if not (-90.0 < self.incl < 90.0):
+            raise ValueError("incl must be in (-90, 90) degrees (sign encodes which edge of the disk is tilted toward the observer; attenuation ordering assumes |incl| < 90).")
         if self.distance <= 0:
             raise ValueError("distance must be positive [pc].")
         if self.fov <= 0:
@@ -270,9 +274,10 @@ def rays_alma_projection(
     npix = int(max(ny, nx))
 
     # ---- LOS after (incl, phi)
-    obs_dir = jnp.squeeze(
+    obs_dir_geom = jnp.squeeze(
         grid.rotate_coords_angles(jnp.array([0.0, 0.0, 1.0]), incl, phi)
     )  # (3,)
+    obs_dir_kinematic = obs_dir_geom.at[:2].multiply(jnp.sign(incl))
 
     # ---- camera-frame directions (arcsec → rad)
     rho   = jnp.sqrt(x_sky**2 + y_sky**2) * arcsec
@@ -286,7 +291,7 @@ def rays_alma_projection(
     # Same (incl, phi) rotation as obs_dir above — a sign mismatch here makes the
     # camera look away from the disk for any phi != 0.
     ray_dir = grid.rotate_coords_angles(ray_dir, incl, phi)
-    ray_dir = grid. rotate_coords_vector(ray_dir, obs_dir, -posang)
+    ray_dir = grid. rotate_coords_vector(ray_dir, obs_dir_geom, -posang)
 
     # ---- intersections with z = ± z_width/2 (world coords in cm)
     d_cm     = distance * pc
@@ -296,25 +301,27 @@ def rays_alma_projection(
     denom_sign = jnp.where(denom >= 0, 1.0, -1.0)
     denom = denom_sign * jnp.maximum(jnp.abs(denom), 1e-30)
 
-    s = ( zhalf_cm - d_cm * obs_dir[2]) / denom
-    t = (-zhalf_cm - d_cm * obs_dir[2]) / denom
+    s = ( zhalf_cm - d_cm * obs_dir_geom[2]) / denom
+    t = (-zhalf_cm - d_cm * obs_dir_geom[2]) / denom
 
-    ray_start = d_cm * obs_dir + s[..., None] * ray_dir  # (ny*nx, 3)
-    ray_stop  = d_cm * obs_dir + t[..., None] * ray_dir  # (ny*nx, 3)
+    ray_start = d_cm * obs_dir_geom + s[..., None] * ray_dir  # (ny*nx, 3)
+    ray_stop  = d_cm * obs_dir_geom + t[..., None] * ray_dir  # (ny*nx, 3)
 
     ray_coords = jnp.linspace(ray_start, ray_stop, nray, axis=1)  # (ny*nx, nray, 3)
     ray_coords = ray_coords.reshape(ny, nx, nray, 3)
 
-    # ---- pixel physical area [cm²] at the source plane
-    fov_rad    = fov_as * arcsec
-    pixel_area = (d_cm * 2.0 * jnp.tan(fov_rad / 2.0) / float(npix)) ** 2
+    # ---- pixel area from FOV (constant over the grid), in cm^2
+    # fov on the image plane at distance d: fov_cm = 2 * d * tan((fov_as*arcsec)/2)
+    fov_rad = fov_as * arcsec
+    fov_cm  = 2.0 * d_cm * jnp.tan(fov_rad / 2.0)
+    pixel_area = (fov_cm / float(npix)) ** 2
 
     rays = RayBundle(
         nx=nx,
         ny=ny,
         coords_xyz=ray_coords,
         pixel_area=pixel_area,
-        obs_dir=obs_dir,
+        obs_dir=obs_dir_kinematic,
         distance_pc=distance
     )
     
@@ -580,7 +587,7 @@ def print_params(params: "ObservationParams") -> None:
 # ----------------------------------------------------------------------------- #
 def compute_camera_freqs(
     num_freqs: int,
-    width_kms: float,
+    width_kms: float, # this is a half-width, so channels span [-width_kms, +width_kms] -- unsure if name is confusing.
     nu0: float,
     v_sys: float = 0.0,
     num_subfreq: int = 1,
@@ -603,7 +610,6 @@ def compute_camera_freqs(
         camera_freqs = camera_freqs[:, None] + sub[None, :]
 
     return camera_freqs
-
 
 # ----------------------------------------------------------------------------- #
 # Volume sampling/ projection / rendering
@@ -699,7 +705,6 @@ def render_cube(
         rays.coords_xyz, rays.obs_dir, nu0, rays.pixel_area, rays.distance_pc
     )
     images = jnp.clip(jnp.nan_to_num(images).reshape(-1, rays.ny, rays.nx)[:nfreq], 0.0)
-
     return images
 
 
