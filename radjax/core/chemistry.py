@@ -124,6 +124,8 @@ def load_molecular_tables(chem_params: "ChemistryParams") -> MolecularData:
         
     # Load raw arrays
     energy_levels = np.loadtxt(table_path, skiprows=7, max_rows=41)
+    if np.any(energy_levels[:, 1] < energy_levels[0, 1]):
+        raise ValueError("The first molecular level must have the lowest energy.")
     radiative_transitions = np.loadtxt(table_path, skiprows=51, max_rows=40)
 
     # Compute Einstein A, B coefficients for this transition
@@ -224,12 +226,13 @@ def n_up_down(
     ntemp, temp0, temp1 = 1000, 0.1, 100000.0
     partition_temp = temp0 * (temp1 / temp0) ** (jnp.arange(ntemp) / (ntemp - 1))
 
-    # Partition function from available levels
-    dendivk = (hh * cc / kk) * jnp.diff(energy_levels[:, 1])
-    dummy = jnp.exp(-dendivk[None] / partition_temp[:, None]) * (
-        energy_levels[1:, 2] / energy_levels[:-1, 2]
+    # Level energies relative to the lowest listed level, divided by k_B [K].
+    energy_k = (hh * cc / kk) * (energy_levels[:, 1] - energy_levels[0, 1])
+    partition_fn = jnp.sum(
+        energy_levels[None, :, 2]
+        * jnp.exp(-energy_k[None, :] / partition_temp[:, None]),
+        axis=-1,
     )
-    partition_fn = energy_levels[0, 2] + jnp.sum(jnp.cumprod(dummy, axis=-1), axis=-1)
     pfunc = jnp.interp(gas_t, partition_temp, partition_fn)
 
     # Identify up/down indices for chosen transition
