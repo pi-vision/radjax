@@ -25,8 +25,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-# constants module must define: G [cgs], au [cm], kk [erg/K], m_mol_h [g]
-from .consts import G, au, kk, m_mol_h
+# constants module must define: G [cgs], au [cm], kk [erg/K], m_h2 [g], X_H
+from .consts import G, au, kk, m_h2, X_H
 
 
 # ----------------------------------------------------------------------------- #
@@ -130,8 +130,8 @@ def number_density_profile(
     # trapezoid rule for the column of the unnormalized profile.
     half_column = jnp.sum(0.5 * (rho[1:] + rho[:-1]) * dz, axis=0, keepdims=True)
     rho     = 0.5 * sigma * rho / half_column
-    # Mass density -> H2 number density (X_CO is defined relative to H2)
-    return rho / m_mol_h
+    # Hydrogen mass density / mass of one H2 -> n_H2 (X_CO is defined relative to H2)
+    return X_H * rho / m_h2
 
 
 def surface_density(z: jnp.ndarray, nd: jnp.ndarray) -> jnp.ndarray:

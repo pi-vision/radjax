@@ -407,7 +407,7 @@ def co_abundance_profile(
     Xco: jnp.ndarray
         Abundance field (dimensionless), same shape as inputs.
     """
-    warm = jnp.bitwise_and(temperature > freezeout, 0.706 * h2_N > N_dissoc)
+    warm = jnp.bitwise_and(temperature > freezeout, h2_N > N_dissoc)
 
     # N_desorp must be a static (non-traced) value: it selects a code branch.
     # Concrete inf disables the cold branch like None; math.isinf on a tracer
@@ -420,7 +420,7 @@ def co_abundance_profile(
     else:
         cold = jnp.bitwise_and(
             temperature <= freezeout,
-            jnp.bitwise_and(0.706 * h2_N > N_dissoc, 0.706 * h2_N < N_desorp),
+            jnp.bitwise_and(h2_N > N_dissoc, h2_N < N_desorp),
         )
 
     active = jnp.bitwise_or(warm, cold)
